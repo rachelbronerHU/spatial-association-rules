@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spatial-association-rules"
+version = "0.1.0"
+description = "Spatial association rule mining for labelled point patterns"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Rachel Broner" }]
+
+dependencies = [
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "scipy",
+    "statsmodels",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools]
+packages = ["spatial_association_rules", "spatial_association_rules.validation"]

@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Environments
+.venv/
+
+# Testing
+.pytest_cache/
+.coverage
+
+# Notebooks
+.ipynb_checkpoints/
