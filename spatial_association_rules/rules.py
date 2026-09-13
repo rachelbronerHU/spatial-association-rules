@@ -6,6 +6,7 @@ What both searches share: support, the metrics, itemset -> rule, and the filters
 
 from collections import Counter
 from itertools import combinations
+from math import comb
 
 import numpy as np
 import pandas as pd
@@ -180,6 +181,17 @@ def labels_with_enough_cells(labels, settings):
     counts = Counter(str(label) for label in labels)
     threshold = max(settings.min_label_count or 0, int((settings.min_label_share or 0) * len(labels)))
     return frozenset(label for label, count in counts.items() if count >= threshold)
+
+
+def count_candidate_rules(labels, settings):
+    """All allowed rules before support/effect filtering, counting each search kind."""
+    n_labels = len(labels_with_enough_cells(labels, settings))
+    # Choose one center and r neighbor types. Split neighbors between the two
+    # sides in 2**r ways, excluding the split with nothing on the right.
+    per_center = sum(comb(n_labels, r) * (2**r - 1)
+                     for r in range(1, min(n_labels, settings.max_items_per_rule - 1) + 1))
+    n_kinds = 2 if settings.include_avoidance_rules else 1
+    return n_labels * per_center * n_kinds
 
 
 def drop_rare_labels(rules, labels, settings):

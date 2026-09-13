@@ -10,6 +10,7 @@ Each test asserts a fact about the algorithm. None of them test the shape of the
 
 import logging
 import math
+from importlib import import_module
 from itertools import combinations
 
 import numpy as np
@@ -34,6 +35,7 @@ from spatial_association_rules.validation.significance import (
     p_values_for,
     survives_shuffle,
 )
+from spatial_association_rules.validation.false_discovery import false_discovery_rates
 from spatial_association_rules.transactions import (
     build_transactions,
     find_patches,
@@ -270,6 +272,55 @@ def test_no_shuffles_means_no_claim():
     p_values = p_values_for(result.rules, result.patches, labels, result.settings,
                             n_shuffles=0, random_seed=42, labels_kept_fixed=())
     assert (p_values == 1).all()
+
+
+def test_individual_fdr_includes_unmined_candidates_without_changing_raw_p_values():
+    coords, labels = grid_tissue()
+    result = mine(coords, labels, base())
+    tested = result.add_p_values(n_shuffles=20, random_seed=1)
+    raw = p_values_for(result.rules, result.patches, labels, result.settings,
+                       n_shuffles=20, random_seed=1, labels_kept_fixed=())
+    # Three centers x three neighbors x two kinds, including unmined rules.
+    assert 0 < len(raw) < 18
+    expected = false_discovery_rates(np.r_[raw, np.ones(18 - len(raw))])[:len(raw)]
+    np.testing.assert_allclose(tested["p_value"], raw)
+    np.testing.assert_allclose(tested["individual_fdr"], expected)
+
+
+def test_requested_subset_keeps_the_full_candidate_count():
+    coords, labels = grid_tissue()
+    result = mine(coords, labels, base())
+    requested = result.rules.iloc[[0]].copy()
+    requested.index = [42]
+    tested = result.add_p_values(n_shuffles=20, rules=requested, random_seed=1)
+    assert tested.index.tolist() == [42]
+    assert tested.iloc[0]["individual_fdr"] == pytest.approx(min(1, tested.iloc[0]["p_value"] * 18))
+
+
+def test_supplied_rules_that_failed_mining_get_one_without_shuffling(monkeypatch):
+    coords, labels = grid_tissue()
+    loose = mine(coords, labels, base())
+    strict = mine(coords, labels, base(min_lift=100))
+    failed = loose.rules[loose.rules["kind"] == "attracts"]
+    assert not failed.empty
+    assert not (strict.rules["kind"] == "attracts").any()
+
+    def check_no_rules_to_shuffle(rules, *args):
+        assert rules.empty
+        return np.ones(0)
+
+    monkeypatch.setattr(import_module("spatial_association_rules.mine"),
+                        "p_values_for", check_no_rules_to_shuffle)
+    tested = strict.add_p_values(n_shuffles=20, rules=failed, random_seed=1)
+    assert (tested[["p_value", "individual_fdr"]] == 1).all().all()
+
+
+def test_empty_mining_result_has_empty_p_values_and_fdr():
+    coords, labels = grid_tissue()
+    result = mine(coords, labels, base(min_label_count=len(labels) + 1))
+    tested = result.add_p_values(n_shuffles=20, random_seed=1)
+    assert tested.empty
+    assert {"p_value", "individual_fdr"} <= set(tested.columns)
 
 
 # --- settings -----------------------------------------------------------------

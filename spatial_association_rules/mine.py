@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 from .attraction import mine_attraction
 from .avoidance import mine_avoidance
-from .rules import drop_rare_labels, empty_rules, weight_matrix
+from .rules import count_candidate_rules, drop_rare_labels, empty_rules, weight_matrix
 from .settings import Settings
 from .validation.significance import p_values_for
 from .validation.false_discovery import false_discovery_rates
@@ -58,17 +58,25 @@ class Result:
     def add_p_values(self, n_shuffles, rules=None, random_seed=None, labels_kept_fixed=(), sample_id=""):
         """
         Test rules against shuffled labels: a raw p_value, and individual_fdr, that
-        same p-value corrected across every rule tested here.
+        same p-value corrected across the sample's complete candidate-rule family.
 
-        Defaults to the rules this sample produced, but takes any subset — the
-        correction is over whatever you pass in.
+        Defaults to this sample's mined rules. Supplied rules that were not mined
+        here get p=1. All omitted candidates also count as p=1 in the correction.
         """
         rules = (self.rules if rules is None else rules).copy()
-        rules["p_value"] = p_values_for(
-            rules, self.patches, self.labels, self.settings,
+        keys = ["antecedents", "consequents", "kind"]
+        passing = rules.set_index(keys).index.isin(self.rules.set_index(keys).index)
+        rules["p_value"] = 1.0
+        rules.loc[passing, "p_value"] = p_values_for(
+            rules.loc[passing], self.patches, self.labels, self.settings,
             n_shuffles, random_seed, labels_kept_fixed, sample_id,
         )
-        rules["individual_fdr"] = false_discovery_rates(rules["p_value"].values)
+        n_tests = count_candidate_rules(self.labels, self.settings)
+        rules["individual_fdr"] = 1.0
+        tested = rules["p_value"] < 1.0
+        rules.loc[tested, "individual_fdr"] = false_discovery_rates(
+            rules.loc[tested, "p_value"].values, n_tests=n_tests,
+        )
         return rules
 
 

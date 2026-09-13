@@ -71,26 +71,21 @@ filtering.
 
 ## Testing many rules at once
 
-Test 12,000 rules at 5% and about 600 look significant by luck. **The right correction
-depends on the claim you are making**, which the library cannot know — so it stores raw
-p-values and corrects nothing. You correct at the point of the claim.
+Searching many rules makes chance findings more likely. `add_p_values()` returns
+raw `p_value` and `individual_fdr`, corrected with Benjamini-Hochberg for each sample.
 
-**A claim about one sample** — *"in FOV 17, CD8T avoids Paneth."* The family is the
-rules tested in FOV 17:
+The correction counts all rule combinations allowed by the maximum rule size and
+minimum cell-count/share settings, before support or effect filtering. Attraction
+and avoidance count separately when both searches are enabled.
 
-```python
-from spatial_association_rules.validation.false_discovery import false_discovery_rates
-one = report.rules().query("sample_id == 'FOV_17'")
-one["sample_fdr"] = false_discovery_rates(one["p_value"])
-```
+For example, if 20 rules pass mining out of 1,000 candidates, FDR counts all 1,000.
+Only the 20 mined rules are shuffled; the other 980 count as p = 1 without extra
+shuffles or rows. Passing a smaller list with `rules=` keeps the same total count.
+Omitted candidates and supplied rules not mined in this sample count as p = 1.
 
-`add_p_values()` already does this and stores the answer as `individual_fdr`.
-
-**A claim about the study** — *"CD8T avoids Paneth, as a recurring feature."* The
-library does not answer this. Counting the samples a rule passed in is not a
-correction: each sample gets its own 5% of false rules, so across 250 samples a
-pure-noise rule turns up in about 12. Build that claim outside the library, and
-correct it there.
+This correction supports claims about one sample. Claims about patterns recurring
+across a study need a separate analysis and correction. The shuffle assumptions
+and BH's assumptions about dependence between rules still need to hold.
 
 ## Complex rules classification
 
@@ -102,11 +97,9 @@ not. Nothing is dropped — four columns are added:
 - `adds_information` — the one column to filter on
 - `simpler_rules` — exactly what it was weighed against
 
-One column is read rather than written: `individual_fdr`, attached by
-`add_p_values()`. It is Benjamini-Hochberg over every rule that call tested, whatever
-its class, so nothing here runs in a circle. *Significant* below means
-`individual_fdr ≤ max_individual_fdr`; rules that were never tested have no
-`individual_fdr`, and lift decides alone.
+Classification uses `individual_fdr` from `add_p_values()`, which counts all allowed
+rules regardless of class. *Significant* below means
+`individual_fdr ≤ max_individual_fdr`. Without that column, lift decides alone.
 
 ### The decision tree
 
@@ -186,10 +179,9 @@ has one of them as its center.
   question, so a few rules that question would have caught are kept instead.
 - **`max_individual_fdr=None`** takes lift at its word: every rule counts as
   convincing. Same when there are no p-values.
-- **`n_shuffles` has to be large enough.** p is floored at `1/(n_shuffles+1)`, and BH
-  needs a fraction `p_floor / max_individual_fdr` of the sample at that floor before
-  anything can clear it — 2% at 1000 shuffles and 0.05. Too few and every rule reads
-  as noise.
+- **`n_shuffles` has to be large enough.** With 1000 shuffles, the smallest possible
+  p-value is about 0.001. Too few shuffles can prevent rules from passing FDR,
+  even when no shuffle passes their thresholds.
 - **Sub-rules and their longer rules are positively correlated**, not independent. BH
   holds under positive dependence (PRDS) — an assumption, not a free lunch.
 

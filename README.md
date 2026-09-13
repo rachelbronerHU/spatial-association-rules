@@ -113,8 +113,8 @@ One row per rule. `mine` gives the first block, `add_p_values` the second,
 | `antecedent support`, `consequent support` | the same, for each side alone |
 | `confidence`, `lift`, `leverage`, `conviction` | how strong it is. `lift > 1` attracts, `< 1` avoids |
 | `len_ant`, `len_con` | items on each side |
-| `p_value` | raw, from the shuffle test. Never corrected for you ([why](DESIGN.md#testing-many-rules-at-once)) |
-| `individual_fdr` | that p-value corrected across the rules of this sample |
+| `p_value` | raw p-value from the shuffle test |
+| `individual_fdr` | p-value corrected for all allowed rules in this sample |
 | `rule_type` | `pairwise`, `ant-complex`, `con-complex`, `both-complex` |
 | `complex_class` | why the rule was kept or dismissed ([how](DESIGN.md#complex-rules-classification)) |
 | `adds_information` | the one column to filter on: does this rule say anything a shorter one did not? |
@@ -171,6 +171,11 @@ threshold is not applied, so a rule is only dropped for a reason you asked for.
 | `n_shuffles` | **required.** The smallest possible p-value is `1/(n_shuffles+1)`, so 5 shuffles can never reach 0.05 |
 | `random_seed` | fix it and re-runs give identical p-values |
 | `labels_kept_fixed` | labels that never move. `"Name"` is exact; `"Name*"` matches anything starting with Name, so `"CD4*"` also catches `CD45` |
+
+FDR counts all rules allowed by your settings, including those mining dropped.
+Dropped rules count as p = 1, with no extra shuffles or rows. Passing a smaller
+list with `rules=` keeps the same total count.
+[Why this matters](DESIGN.md#testing-many-rules-at-once).
 
 Two things it will not fudge:
 
