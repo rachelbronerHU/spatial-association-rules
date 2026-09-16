@@ -11,9 +11,30 @@ requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Rachel Broner" }]
+keywords = [
+    "spatial",
+    "association-rules",
+    "point-pattern",
+    "spatial-statistics",
+    "single-cell",
+    "spatial-omics",
+    "data-mining",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
 
 dependencies = [
-    "numpy",
+    "numpy>=2.0",
     "pandas",
     "scikit-learn",
     "scipy",
@@ -23,5 +44,10 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest"]
 
-[tool.setuptools]
-packages = ["spatial_association_rules", "spatial_association_rules.validation"]
+[project.urls]
+Homepage = "https://github.com/rachelbronerHU/spatial-association-rules"
+Repository = "https://github.com/rachelbronerHU/spatial-association-rules"
+Issues = "https://github.com/rachelbronerHU/spatial-association-rules/issues"
+
+[tool.setuptools.packages.find]
+include = ["spatial_association_rules*"]
