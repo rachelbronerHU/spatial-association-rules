@@ -87,6 +87,20 @@ This correction supports claims about one sample. Claims about patterns recurrin
 across a study need a separate analysis and correction. The shuffle assumptions
 and BH's assumptions about dependence between rules still need to hold.
 
+## Support from bits
+
+A cell type is either in a patch or it is not, so one bit records it. `packed()` builds
+that map once, and it is read two ways.
+
+**Binary weights** are 0 or 1, so the bits are the whole answer: count them.
+
+**Real weights** must still be compared, but the bits say which patches to read. A patch
+missing any item of a group counts 0 towards it, and adding 0 changes nothing, so the
+rest are skipped. When the map is more than `MOSTLY_ABSENT` full, too few get skipped to
+be worth the trouble, and every patch is read.
+
+Both give the same answer, and a test proves it.
+
 ## Complex rules classification
 
 A rule with 3 or more items is asked whether it adds anything its shorter parts did

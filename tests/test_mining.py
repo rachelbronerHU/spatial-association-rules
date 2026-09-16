@@ -29,6 +29,7 @@ from spatial_association_rules.avoidance import (
 )
 from spatial_association_rules.mine import Result, mine_rules
 from spatial_association_rules.rules import (
+    MOSTLY_ABSENT,
     metrics,
     packed,
     splits_of,
@@ -121,6 +122,36 @@ def test_weighted_support_is_min_based():
     assert both == pytest.approx((0.5 + 0.2 + 0.0) / 3)
     # Downward closure: adding an item can never raise support.
     assert both <= support_of(frozenset({"A_CENTER"}), matrix, index)
+
+
+def test_support_of_many_agrees_with_the_definition_however_full_the_table_is():
+    """
+    support_of_many() has two routes and both must answer what support_of() answers.
+
+    A table with few weights present is measured by hunting the transactions that hold a
+    whole group; a crowded one by taking a minimum over every transaction. Which route
+    runs is decided by MOSTLY_ABSENT, so both tables here are built to pick one.
+    """
+    items = ["A_CENTER", "B_NEIGHBOR", "C_NEIGHBOR", "D_NEIGHBOR", "E_NEIGHBOR"]
+
+    # Two items per transaction out of five -> most weights absent, and the weights all
+    # differ, so a minimum taken over the wrong transactions cannot pass by luck.
+    sparse = [{items[row % 5]: 0.4 + 0.1 * (row % 3),
+               items[(row + 1) % 5]: 0.9 - 0.1 * (row % 5)} for row in range(70)]
+    # Every item in every transaction -> nothing absent at all.
+    crowded = [{item: 0.3 + 0.1 * ((row + i) % 6) for i, item in enumerate(items)}
+               for row in range(70)]
+
+    for transactions in (sparse, crowded):
+        matrix, item_index = weight_matrix(transactions)
+        present = np.count_nonzero(matrix) / matrix.size
+        assert bool(present < MOSTLY_ABSENT) == (transactions is sparse)
+
+        for width in (1, 2, 3):
+            for group in combinations(sorted(item_index), width):
+                columns = np.array([[item_index[item] for item in group]])
+                assert support_of_many(matrix, columns)[0] == pytest.approx(
+                    support_of(frozenset(group), matrix, item_index))
 
 
 def test_packed_support_answers_exactly_what_the_float_path_answers():

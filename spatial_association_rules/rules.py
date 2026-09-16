@@ -21,6 +21,9 @@ COLUMNS = ["antecedents", "consequents", "kind", "support", "antecedent support"
            "len_ant", "len_con"]
 
 BLOCK = 4_000_000        # biggest temporary allowed while measuring, in floats
+MOSTLY_ABSENT = 0.5      # a table emptier than this is searched, not read right through
+# How many 1s are in each of the 256 values a byte can hold.
+ONES_IN_BYTE = np.array([bin(byte).count("1") for byte in range(256)], dtype=np.uint8)
 
 
 # --- support and metrics ---------------------------------------------------
@@ -59,28 +62,13 @@ def support_of(itemset, matrix, item_index):
     return support_of_columns(matrix[:, columns], matrix.shape[0])
 
 
-def support_of_many(matrix, columns):
-    """Calculates the joint support for thousands of different cell combinations at the exact same time."""
-    out = np.zeros(len(columns))
-    n = matrix.shape[0]
-    if n == 0 or len(columns) == 0:
-        return out
-
-    per_group = max(1, n * max(1, columns.shape[1]))
-    step = max(1, BLOCK // per_group)
-    for start in range(0, len(columns), step):
-        block = columns[start:start + step]
-        out[start:start + len(block)] = matrix[:, block].min(axis=2).sum(axis=0) / n
-    return out
-
-
 def packed(matrix):
     """
-    A table of 0/1 weights shrunk to one bit each. Binary weighting only.
+    Which items each transaction holds, one bit apiece.
 
-    An item is either in a transaction or it is not, so one bit says all there is to
-    say. Sixty-four transactions then fit inside a single number, which is what makes
-    the counting in support_of_many_packed() cheap.
+    An item is either in a transaction or it is not, so a single bit says all there is
+    to say about that. Sixty-four transactions then fit inside one number, so they can
+    be ruled in or out sixty-four at a time.
     """
     # One row of bits per item, laid end to end so a whole row can be packed at once.
     present = np.ascontiguousarray(np.asarray(matrix, dtype=bool).T)
@@ -95,13 +83,69 @@ def packed(matrix):
     return np.packbits(present, axis=1, bitorder="little").view(np.uint64)
 
 
+def support_of_many(matrix, columns):
+    """
+    Calculates the joint support for thousands of different cell combinations at the exact same time.
+
+    A transaction missing any item of a group adds 0 to that group, so when most weights
+    are absent it pays to find the few transactions holding a whole group. A crowded
+    table has nothing worth skipping, and is read straight through as it always was.
+    """
+    supports = np.zeros(len(columns))
+    n = matrix.shape[0]
+    if n == 0 or len(columns) == 0:
+        return supports
+
+    if np.count_nonzero(matrix) < MOSTLY_ABSENT * matrix.size:
+        return _support_from_matching_rows(matrix, columns)
+
+    per_group = max(1, n * max(1, columns.shape[1]))
+    step = max(1, BLOCK // per_group)
+    for start in range(0, len(columns), step):
+        block = columns[start:start + step]
+        supports[start:start + len(block)] = matrix[:, block].min(axis=2).sum(axis=0) / n
+    return supports
+
+
+def _support_from_matching_rows(matrix, columns):
+    """
+    The support of each group, weighed only where every item of it is present.
+
+    In every other transaction the weakest item of the group weighs 0, and adding 0
+    changes no total, so those transactions are skipped.
+    """
+    n = matrix.shape[0]
+    bits = packed(matrix)
+
+    supports = np.zeros(len(columns))
+    for i, group in enumerate(columns):
+        rows = _matching_rows(bits, group, n)
+        if len(rows):
+            # np.ix_ cuts out those rows and this group's columns, and nothing else.
+            supports[i] = matrix[np.ix_(rows, group)].min(axis=1).sum() / n
+    return supports
+
+
+def _matching_rows(bits, group, n_transactions):
+    """Which transactions hold every item of the group, as row numbers."""
+    # Start from the first item, then drop any transaction missing one of the others.
+    together = bits[group[0]].copy()
+    for item in group[1:]:
+        together &= bits[item]
+
+    # Undo the packing, back to one bit per transaction, less the blanks packed() added.
+    one_each = np.unpackbits(together.view(np.uint8), bitorder="little")
+    return np.flatnonzero(one_each[:n_transactions])
+
+
 def support_of_many_packed(bits, columns, n_transactions):
     """
-    What support_of_many() measures, for 0/1 weights only.
+    *For binary weighting only*
+    What support_of_many() measures.
 
     With nothing but 0s and 1s, "the weakest item in this transaction" is really just
-    "are they all here?". So joining two items is an and, and the support is how many
-    1s are left over -- which the processor counts 64 transactions at a time.
+    "are they all here?". So joining two items is an and over 64 transactions at once,
+    and the support is however many 1s are left over.
     """
     supports = np.zeros(len(columns))
     if n_transactions == 0 or len(columns) == 0:
@@ -114,8 +158,9 @@ def support_of_many_packed(bits, columns, n_transactions):
     for item in columns.T[1:]:
         together &= bits[item]
 
-    # The 1s still standing, as a share of all transactions.
-    return np.bitwise_count(together).sum(axis=1) / n_transactions
+    # np.bitwise_count would count these in one step, but it needs NumPy 2. So read
+    # each word as its 8 bytes instead, and look up how many 1s each byte holds.
+    return ONES_IN_BYTE[together.view(np.uint8)].sum(axis=1) / n_transactions
 
 
 def metrics(support, ant_support, con_support):

@@ -16,3 +16,6 @@ dist/
 
 # Notebooks
 .ipynb_checkpoints/
+
+# To remove
+example-to-remove/*
