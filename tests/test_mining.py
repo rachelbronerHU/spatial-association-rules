@@ -28,7 +28,15 @@ from spatial_association_rules.avoidance import (
     sides_worth_pairing,
 )
 from spatial_association_rules.mine import Result, mine_rules
-from spatial_association_rules.rules import metrics, splits_of, support_of, weight_matrix
+from spatial_association_rules.rules import (
+    metrics,
+    packed,
+    splits_of,
+    support_of,
+    support_of_many,
+    support_of_many_packed,
+    weight_matrix,
+)
 from spatial_association_rules.validation.significance import (
     _rule_columns,
     not_crowded,
@@ -113,6 +121,32 @@ def test_weighted_support_is_min_based():
     assert both == pytest.approx((0.5 + 0.2 + 0.0) / 3)
     # Downward closure: adding an item can never raise support.
     assert both <= support_of(frozenset({"A_CENTER"}), matrix, index)
+
+
+def test_packed_support_answers_exactly_what_the_float_path_answers():
+    """
+    With 0/1 weights the bitset path is an optimisation, not a second definition of support.
+
+    130 transactions on purpose: bitsets hold 64 to a word, so this crosses a word
+    boundary and leaves a part-full last word whose padding must not be counted.
+    """
+    transactions = [binary("A_CENTER", "B_NEIGHBOR") if row % 2
+                    else binary("A_CENTER", "C_NEIGHBOR") if row % 3
+                    else binary("D_CENTER", "B_NEIGHBOR")
+                    for row in range(130)]
+    matrix, item_index = weight_matrix(transactions)
+    bits = packed(matrix)
+    items = sorted(item_index.values())
+
+    for width in (1, 2, 3):
+        columns = np.array([list(group) for group in combinations(items, width)])
+        assert support_of_many_packed(bits, columns, len(transactions)) == pytest.approx(
+            support_of_many(matrix, columns))
+
+    # A pair that never co-occurs and one that always does: neither is all this compares.
+    assert support_of_many_packed(bits, np.array([[item_index["D_CENTER"],
+                                                   item_index["C_NEIGHBOR"]]]), 130) == 0.0
+    assert support_of_many_packed(bits, np.array([[item_index["A_CENTER"]]]), 130) > 0.0
 
 
 def test_binary_rule_metrics_are_hand_checkable():

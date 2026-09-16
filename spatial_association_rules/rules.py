@@ -74,6 +74,50 @@ def support_of_many(matrix, columns):
     return out
 
 
+def packed(matrix):
+    """
+    A table of 0/1 weights shrunk to one bit each. Binary weighting only.
+
+    An item is either in a transaction or it is not, so one bit says all there is to
+    say. Sixty-four transactions then fit inside a single number, which is what makes
+    the counting in support_of_many_packed() cheap.
+    """
+    # One row of bits per item, laid end to end so a whole row can be packed at once.
+    present = np.ascontiguousarray(np.asarray(matrix, dtype=bool).T)
+
+    # Bits travel in groups of 64, so count the empty slots the last group still has.
+    blanks = -present.shape[1] % 64
+    if blanks:
+        # Fill them with 0, meaning "item absent", so they can never add to a count.
+        present = np.pad(present, ((0, 0), (0, blanks)))
+
+    # Eight bits to a byte, eight bytes to a 64-bit number.
+    return np.packbits(present, axis=1, bitorder="little").view(np.uint64)
+
+
+def support_of_many_packed(bits, columns, n_transactions):
+    """
+    What support_of_many() measures, for 0/1 weights only.
+
+    With nothing but 0s and 1s, "the weakest item in this transaction" is really just
+    "are they all here?". So joining two items is an and, and the support is how many
+    1s are left over -- which the processor counts 64 transactions at a time.
+    """
+    supports = np.zeros(len(columns))
+    if n_transactions == 0 or len(columns) == 0:
+        return supports
+
+    # Each row of columns is one group of items. Start from the group's first item.
+    together = bits[columns[:, 0]]
+
+    # Keep a bit only where the group's next item is present too.
+    for item in columns.T[1:]:
+        together &= bits[item]
+
+    # The 1s still standing, as a share of all transactions.
+    return np.bitwise_count(together).sum(axis=1) / n_transactions
+
+
 def metrics(support, ant_support, con_support):
     """confidence, lift, leverage, conviction. Takes single numbers or whole arrays."""
     support = np.asarray(support, dtype=float)

@@ -15,7 +15,8 @@ from scipy import sparse
 
 from ..attraction import attracts
 from ..avoidance import avoids
-from ..rules import AVOIDS, metrics, support_of_many
+from ..rules import AVOIDS, metrics, packed, support_of_many, support_of_many_packed
+from ..settings import Weighting
 from ..transactions import CENTER, NEIGHBOR, item_of
 
 logger = logging.getLogger(__name__)
@@ -285,11 +286,16 @@ def _rule_columns(rules, item_index):
                    (rules["kind"] == AVOIDS).to_numpy())
 
 
-def _supports(layout, transactions):
+def _supports(layout, transactions, settings):
     """Support of every distinct column group, then read off per rule."""
+    # Binary weights are 0 or 1, so a support is a count of bits. Weighted ones need the floats.
+    binary = settings.weighting is Weighting.BINARY
+    bits = packed(transactions) if binary else None
+
     measured = np.zeros(layout.n_groups)
     for positions, group_columns in layout.sized:
-        measured[positions] = support_of_many(transactions, group_columns)
+        measured[positions] = (support_of_many_packed(bits, group_columns, len(transactions))
+                               if binary else support_of_many(transactions, group_columns))
 
     return measured[layout.ant_at], measured[layout.con_at], measured[layout.joint_at]
 
@@ -302,7 +308,7 @@ def survives_shuffle(layout, transactions, settings):
         return held
 
     n = transactions.shape[0]
-    ant_sup, con_sup, joint = _supports(layout, transactions)
+    ant_sup, con_sup, joint = _supports(layout, transactions, settings)
 
     # Both sides must exist before the thresholds mean anything.
     testable = layout.usable & (ant_sup > 0) & (con_sup > 0)
