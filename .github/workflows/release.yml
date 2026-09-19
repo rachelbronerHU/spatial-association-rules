@@ -10,11 +10,12 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     environment: pypi
-    permissions:
+    permissions:          # naming any permission drops every default, so both are listed
+      contents: read         # checkout needs this to read a private repo
       id-token: write        # how PyPI checks this really is our workflow. No token is stored.
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
