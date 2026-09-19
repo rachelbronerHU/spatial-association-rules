@@ -1,0 +1,33 @@
+name: Release
+
+# Pushing a version tag publishes that tag to PyPI. Nothing else does.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:       # lets you run it by hand from the Actions tab, to check it works
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write        # how PyPI checks this really is our workflow. No token is stored.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build and check
+        run: |
+          pip install build twine
+          python -m build
+          twine check dist/*
+
+      - name: Run the tests against what was built
+        run: |
+          pip install dist/*.whl pytest
+          python -c "import spatial_association_rules as m; print('testing:', m.__file__)"
+          pytest tests -q
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
