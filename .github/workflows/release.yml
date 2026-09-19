@@ -25,9 +25,13 @@ jobs:
           python -m build
           twine check dist/*
 
+      # Run from outside the checkout, or the source folder shadows the installed wheel
+      # and the tests quietly check the wrong copy.
       - name: Run the tests against what was built
         run: |
           pip install dist/*.whl pytest
+          cp -r tests "$RUNNER_TEMP/tests"
+          cd "$RUNNER_TEMP"
           python -c "import spatial_association_rules as m; print('testing:', m.__file__)"
           pytest tests -q
 
