@@ -17,7 +17,8 @@ from .rules import filter_rules
 from .runner import RunReport, SampleResult, run_samples
 from .settings import Method, Settings, Weighting
 from .validation.significance import seed_for
-from .transactions import CENTER, NEIGHBOR, strip_role
+from .transactions import (CENTER, NEIGHBOR, find_patches, is_crowded_by_one_type,
+                           strip_role)
 
 # Small on purpose: this is the promise. Everything else is free to change.
 __all__ = [
@@ -25,4 +26,5 @@ __all__ = [
     "mine", "Result", "filter_rules",
     "run_samples", "RunReport", "SampleResult", "seed_for",
     "CENTER", "NEIGHBOR", "strip_role",
+    "find_patches", "is_crowded_by_one_type",
 ]
