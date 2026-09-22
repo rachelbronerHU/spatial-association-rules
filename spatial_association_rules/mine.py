@@ -15,7 +15,7 @@ from .avoidance import mine_avoidance
 from .rules import count_candidate_rules, drop_rare_labels, empty_rules, weight_matrix
 from .settings import Settings
 from .validation.significance import p_values_for
-from .validation.false_discovery import false_discovery_rates
+from .validation.false_discovery import false_discovery_rates, minimum_shuffles_for_fdr
 from .transactions import Patch, build_transactions, find_patches, measure_patches
 
 
@@ -55,28 +55,48 @@ class Result:
     labels: np.ndarray = field(repr=False)
     settings: Settings = field(repr=False)
 
-    def add_p_values(self, n_shuffles, rules=None, random_seed=None, labels_kept_fixed=(), sample_id=""):
+    def add_p_values(self, n_shuffles, random_seed=None, labels_kept_fixed=(), sample_id="",
+                     max_individual_fdr=None):
         """
-        Test rules against shuffled labels: a raw p_value, and individual_fdr, that
-        same p-value corrected across the sample's complete candidate-rule family.
+        Return raw p-values and corrected p-values (individual_fdr) for this sample.
+        Correct each rule size separately, with attraction and avoidance together.
 
-        Defaults to this sample's mined rules. Supplied rules that were not mined
-        here get p=1. All omitted candidates also count as p=1 in the correction.
+        Rules dropped by the search count as p=1, without adding rows. With a cutoff
+        set, warn if too few shuffles are planned for any rule of a size to pass.
+        Those sizes still get raw p-values, but individual_fdr is NaN (missing).
+        A cutoff of None skips this check and still calculates corrected values.
         """
-        rules = (self.rules if rules is None else rules).copy()
-        keys = ["antecedents", "consequents", "kind"]
-        passing = rules.set_index(keys).index.isin(self.rules.set_index(keys).index)
-        rules["p_value"] = 1.0
-        rules.loc[passing, "p_value"] = p_values_for(
-            rules.loc[passing], self.patches, self.labels, self.settings,
+        if max_individual_fdr is not None and not 0 < max_individual_fdr <= 1:
+            raise ValueError("max_individual_fdr must be in (0, 1], or None")
+        rules = self.rules.copy()
+        sizes = rules["antecedents"].map(len) + rules["consequents"].map(len)
+        rules["individual_fdr"] = 1.0
+        families = []
+        for size, group in rules.groupby(sizes):
+            n_tests = count_candidate_rules(self.labels, self.settings, n_items=size)
+            if max_individual_fdr is not None:
+                needed = minimum_shuffles_for_fdr(n_tests, len(group), max_individual_fdr)
+                if n_shuffles < needed:
+                    prefix = f"[{sample_id}] " if sample_id else ""
+                    logger.warning(
+                        f"{prefix}Insufficient permutation resolution for {size}-item rules: "
+                        f"{n_tests} candidates, {len(group)} mined, {n_shuffles} shuffles. "
+                        f"At least {needed} shuffles are needed for any possibility of "
+                        f"BH <= {max_individual_fdr}, even with zero shuffle successes. "
+                        "Raw p-values will still be calculated; individual_fdr is NaN."
+                    )
+                    rules.loc[group.index, "individual_fdr"] = np.nan
+                    continue
+            families.append((group.index, n_tests))
+
+        rules["p_value"] = p_values_for(
+            rules, self.patches, self.labels, self.settings,
             n_shuffles, random_seed, labels_kept_fixed, sample_id,
         )
-        n_tests = count_candidate_rules(self.labels, self.settings)
-        rules["individual_fdr"] = 1.0
-        tested = rules["p_value"] < 1.0
-        rules.loc[tested, "individual_fdr"] = false_discovery_rates(
-            rules.loc[tested, "p_value"].values, n_tests=n_tests,
-        )
+        for index, n_tests in families:
+            rules.loc[index, "individual_fdr"] = false_discovery_rates(
+                rules.loc[index, "p_value"].values, n_tests=n_tests,
+            )
         return rules
 
 

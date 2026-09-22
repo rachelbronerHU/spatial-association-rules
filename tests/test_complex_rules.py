@@ -36,7 +36,7 @@ def rule(antecedents, consequents, lift, kind=ATTRACTS, p_value=None):
 
 
 def classify(*rows, min_lift_gain=GAIN, max_individual_fdr=FDR):
-    """Classify rules, correcting first exactly as add_p_values() does in a real run."""
+    """Classify example rules after correcting their p-values as one test group."""
     frame = pd.DataFrame(list(rows))
     if "p_value" in frame.columns:
         frame["individual_fdr"] = false_discovery_rates(frame["p_value"].values)
@@ -254,6 +254,18 @@ def test_rules_never_corrected_fall_back_to_lift_instead_of_raising():
     )
     assert class_of(frame, 0) == "redundant_by_simpler"
     assert "individual_fdr" not in frame.columns, "nothing was tested, so nothing to correct"
+
+
+@pytest.mark.parametrize("cutoff,expected", [(FDR, "simpler_are_noise"), (None, "redundant_by_simpler")])
+def test_missing_adjustment_does_not_pass_an_enabled_fdr_gate(cutoff, expected):
+    frame = pd.DataFrame([
+        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"], lift=2.0),
+        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=2.0),
+    ])
+    frame["individual_fdr"] = [0.01, float("nan")]
+    classified = classify_complex_rules(frame, GAIN, cutoff)
+    assert class_of(classified, 0) == expected
+    assert pd.isna(classified.iloc[1].individual_fdr)
 
 
 # --- the correction is an input, and every class keeps it ----------------------

@@ -352,40 +352,48 @@ def test_individual_fdr_includes_unmined_candidates_without_changing_raw_p_value
     np.testing.assert_allclose(tested["individual_fdr"], expected)
 
 
-def test_requested_subset_keeps_the_full_candidate_count():
-    coords, labels = grid_tissue()
-    result = mine(coords, labels, base())
-    requested = result.rules.iloc[[0]].copy()
-    requested.index = [42]
-    tested = result.add_p_values(n_shuffles=20, rules=requested, random_seed=1)
-    assert tested.index.tolist() == [42]
-    assert tested.iloc[0]["individual_fdr"] == pytest.approx(min(1, tested.iloc[0]["p_value"] * 18))
-
-
-def test_supplied_rules_that_failed_mining_get_one_without_shuffling(monkeypatch):
-    coords, labels = grid_tissue()
-    loose = mine(coords, labels, base())
-    strict = mine(coords, labels, base(min_lift=100))
-    failed = loose.rules[loose.rules["kind"] == "attracts"]
-    assert not failed.empty
-    assert not (strict.rules["kind"] == "attracts").any()
-
-    def check_no_rules_to_shuffle(rules, *args):
-        assert rules.empty
-        return np.ones(0)
-
-    monkeypatch.setattr(import_module("spatial_association_rules.mine"),
-                        "p_values_for", check_no_rules_to_shuffle)
-    tested = strict.add_p_values(n_shuffles=20, rules=failed, random_seed=1)
-    assert (tested[["p_value", "individual_fdr"]] == 1).all().all()
-
-
 def test_empty_mining_result_has_empty_p_values_and_fdr():
     coords, labels = grid_tissue()
     result = mine(coords, labels, base(min_label_count=len(labels) + 1))
     tested = result.add_p_values(n_shuffles=20, random_seed=1)
     assert tested.empty
     assert {"p_value", "individual_fdr"} <= set(tested.columns)
+
+
+def test_runner_forwards_fdr_cutoff_and_preserves_raw_p_values(caplog):
+    from spatial_association_rules.runner import _run_one
+
+    coords, labels = grid_tissue()
+    settings = base()
+    expected = mine(coords, labels, settings).add_p_values(n_shuffles=1, random_seed=42)
+    result, failure = _run_one(("FOV1", coords, labels, settings, 1, 42, (), None, 0.05))
+    assert failure is None
+    assert not result.rules.empty
+    np.testing.assert_allclose(result.rules.p_value, expected.p_value)
+    assert result.rules.individual_fdr.isna().all()
+    assert "[FOV1] Insufficient permutation resolution" in caplog.text
+
+
+def test_resolution_check_includes_rules_from_relaxed_high_confidence_support(monkeypatch, caplog):
+    transactions = ([binary("A_CENTER", "B_NEIGHBOR")] * 2
+                    + [binary("C_CENTER", "D_NEIGHBOR")] * 18)
+    settings = base(weighting=Weighting.BINARY, min_support=0.2, min_lift=1.2,
+                    include_avoidance_rules=False)
+    assert mine_rules(transactions, settings).empty
+    settings = settings.replace(strong_confidence=0.9, min_support_when_strong=0.05)
+    mined = mine_rules(transactions, settings)
+    assert len(mined) == 1
+    assert mined.iloc[0].support == pytest.approx(0.1)
+    result = Result(mined, {}, [], np.array(["A", "B", "C", "D"]), settings)
+
+    def shuffling(rules, *args):
+        assert len(rules) == 1
+        return np.array([1 / 320])
+
+    monkeypatch.setattr(import_module("spatial_association_rules.mine"), "p_values_for", shuffling)
+    tested = result.add_p_values(319, max_individual_fdr=0.05)
+    assert not caplog.records
+    assert tested.iloc[0].individual_fdr == pytest.approx(0.05)  # 16 candidates, R=1.
 
 
 # --- settings -----------------------------------------------------------------
@@ -779,8 +787,9 @@ def test_a_rule_naming_a_missing_cell_type_is_untested_not_perfect():
     elsewhere = result.rules.head(3).copy()
     elsewhere["consequents"] = [("Nowhere_NEIGHBOR",)] * len(elsewhere)
 
-    tested = result.add_p_values(n_shuffles=20, rules=elsewhere, random_seed=1)
-    assert (tested["p_value"] == 1.0).all()
+    p_values = p_values_for(elsewhere, result.patches, labels, result.settings,
+                            n_shuffles=20, random_seed=1, labels_kept_fixed=())
+    assert (p_values == 1.0).all()
     # The real rules still get real p-values, so the fix has not flattened everything.
     assert result.add_p_values(n_shuffles=20, random_seed=1)["p_value"].min() < 1.0
 
@@ -909,16 +918,15 @@ def test_avoidance_rules_cannot_be_tested_without_their_threshold():
     """
     Judging them by a threshold other than the one that found them answers another question.
 
-    Reachable by turning the avoidance search off and handing avoidance rules in, which
-    is the same path as testing one sample's rules against another.
+    Reachable by turning the avoidance search off on a result that already holds
+    avoidance rules.
     """
     coords, labels = grid_tissue()
     result = mine(coords, labels, base(min_patches=0))
-    avoiding = result.rules[result.rules["kind"] == "avoids"]
-    assert not avoiding.empty
+    assert (result.rules["kind"] == "avoids").any()
 
     without = result.settings.replace(include_avoidance_rules=False, avoidance_max_lift=None)
     blind = Result(rules=result.rules, stats=result.stats, patches=result.patches,
                    labels=result.labels, settings=without)
     with pytest.raises(ValueError, match="avoidance_max_lift"):
-        blind.add_p_values(n_shuffles=5, rules=avoiding)
+        blind.add_p_values(n_shuffles=5)

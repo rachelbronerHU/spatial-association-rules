@@ -8,9 +8,8 @@ Rules are counted by item but compared by cell type. 'Paneth_CENTER + Paneth_NEI
 is two items, and both are Paneth — so the rule is complex, and it answers to
 'Paneth -> ...' rather than only to the one arrangement that happens to match.
 
-individual_fdr is read, never written: add_p_values() corrects across every rule it
-tested, whatever its class, so nothing here runs in a circle. See DESIGN.md, "Complex
-rules classification".
+Read individual_fdr from add_p_values(), which corrects each rule size separately.
+Classification does not change those values. See DESIGN.md, "Complex rules classification".
 """
 
 import itertools
@@ -49,9 +48,12 @@ def classify_complex_rules(rules, min_lift_gain, max_individual_fdr=None):
     - simpler_rules:    what the rule was weighed against
 
     min_lift_gain:      how much a longer rule must beat a shorter one by
-    max_individual_fdr: how low a rule's individual_fdr must be before it can condemn
-                        a longer one. Smaller is stronger. None, or rules with no
-                        individual_fdr, takes lift at its word.
+    max_individual_fdr: cutoff a shorter rule must pass to dismiss a longer one.
+                        Missing values fail this check. None, or an absent
+                        individual_fdr column, means use lift alone.
+
+    Classification still runs when values are missing. A rule's own FDR does not
+    decide its class; check it separately before treating the rule as significant.
     """
     if rules.empty:
         rules = rules.copy()
@@ -87,10 +89,11 @@ def classify_complex_rules(rules, min_lift_gain, max_individual_fdr=None):
 
     def pass_fdr_threshold(pos):
         """
-        Does this rule stand up on its own (fdr smaller than threshold), enough to condemn a longer one?
-        With no threshold, or no p-value to judge by, lift has the last word.
+        Can this rule's corrected p-value support dismissing a longer rule?
+        Missing values fail. No cutoff or no FDR column skips this check.
         """
-        return max_individual_fdr is None or pd.isna(fdrs[pos]) or fdrs[pos] <= max_individual_fdr
+        return (max_individual_fdr is None or "individual_fdr" not in rules.columns
+                or (pd.notna(fdrs[pos]) and fdrs[pos] <= max_individual_fdr))
 
     def best_of(group, kind):
         """

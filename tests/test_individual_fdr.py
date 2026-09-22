@@ -1,14 +1,19 @@
 """
-Tests for the per-sample correction: many rules were tested at once, so correct
-across them together. Attached as `individual_fdr` by `Result.add_p_values`.
+Check corrected p-values by sample and rule size, with attraction and avoidance together.
 """
 
+from importlib import import_module
+
 import numpy as np
+import pandas as pd
 import pytest
 
 from spatial_association_rules import Method, Settings, Weighting
+from spatial_association_rules.mine import Result
 from spatial_association_rules.rules import count_candidate_rules
-from spatial_association_rules.validation.false_discovery import false_discovery_rates
+from spatial_association_rules.validation.false_discovery import (
+    false_discovery_rates, minimum_shuffles_for_fdr,
+)
 
 
 def test_false_discovery_rates_are_not_simply_stricter_when_wider():
@@ -68,3 +73,69 @@ def test_candidate_family_uses_label_eligibility_but_not_effect_thresholds():
     assert count_candidate_rules(labels, settings) == 20
     assert count_candidate_rules(labels, settings.replace(min_lift=100, min_support=0.9)) == 20
     assert count_candidate_rules(labels, settings.replace(min_label_count=None, min_label_share=0.4)) == 20
+
+
+def test_candidate_counts_by_size_partition_the_full_family():
+    settings = Settings(weighting=Weighting.BINARY, method=Method.CN, radius=1,
+                        min_support=0.1, min_lift=1.2, max_items_per_rule=5,
+                        avoidance_max_lift=0.8)
+    labels = [str(i) for i in range(32)]
+    counts = [count_candidate_rules(labels, settings, n_items=k) for k in range(2, 6)]
+    assert counts == [2048, 95232, 2222080, 34521600]  # Both kinds together.
+    assert sum(counts) == count_candidate_rules(labels, settings)
+    assert count_candidate_rules(labels, settings.replace(max_items_per_rule=3), n_items=4) == 0
+
+
+def test_minimum_shuffle_budget_includes_the_equality_boundary():
+    needed = minimum_shuffles_for_fdr(18, 2, 0.05)
+    assert needed == 179
+    assert (false_discovery_rates([1 / (needed + 1)] * 2, n_tests=18) <= 0.05).all()
+    assert (false_discovery_rates([1 / needed] * 2, n_tests=18) > 0.05).all()
+    assert minimum_shuffles_for_fdr(18, 2, 1) == 0
+
+
+@pytest.mark.parametrize("shuffles,cutoff,blocked", [
+    (178, 0.05, {2, 3}), (179, 0.05, {3}), (199, 0.05, {3}),
+    (1079, 0.05, set()), (199, None, set()), (199, 0.5, set()),
+    (0, 0.05, {2, 3}), (0, 1, set()),
+])
+def test_resolution_check_precedes_shuffles_and_only_skips_impossible_sizes(
+        monkeypatch, caplog, shuffles, cutoff, blocked):
+    settings = Settings(weighting=Weighting.BINARY, method=Method.CN, radius=1,
+                        min_support=0.1, min_lift=1.2, max_items_per_rule=3,
+                        avoidance_max_lift=0.8)
+    mined = pd.DataFrame([
+        (("A_CENTER",), ("B_NEIGHBOR",), "attracts"),
+        (("B_CENTER",), ("A_NEIGHBOR",), "avoids"),
+        (("A_CENTER",), ("B_NEIGHBOR", "C_NEIGHBOR"), "attracts"),
+    ], columns=["antecedents", "consequents", "kind"], index=[42, 7, 9])
+    result = Result(mined, {}, [], np.array(["A", "B", "C"]), settings)
+
+    def shuffling(rules, *args):
+        # A blocked size still gets its raw p-values, so every mined rule is shuffled.
+        assert len(rules) == 3
+        assert len(caplog.records) == len(blocked), "warnings must precede shuffling"
+        for size in blocked:
+            assert f"[FOV1] Insufficient permutation resolution for {size}-item" in caplog.text
+        return np.full(len(rules), 1 / (shuffles + 1))
+
+    monkeypatch.setattr(import_module("spatial_association_rules.mine"), "p_values_for", shuffling)
+    tested = result.add_p_values(shuffles, max_individual_fdr=cutoff, sample_id="FOV1")
+    assert tested.index.tolist() == [42, 7, 9]
+    assert tested.p_value.tolist() == [1 / (shuffles + 1)] * 3
+    for pos, size in enumerate([2, 2, 3]):
+        adjusted = tested.iloc[pos].individual_fdr
+        if size in blocked:
+            assert np.isnan(adjusted)
+        else:
+            # For pairs: 18 candidates / 2 mined, including opposite kinds.
+            # For triples: 54 candidates / 1 mined, independent of the pair ranks.
+            factor = 9 if size == 2 else 54
+            assert adjusted == pytest.approx(min(1, factor / (shuffles + 1)))
+
+
+@pytest.mark.parametrize("cutoff", [0, -0.1, 1.1, float("nan"), float("inf")])
+def test_invalid_fdr_cutoff_is_rejected_before_shuffling(cutoff):
+    result = Result(pd.DataFrame(), {}, [], np.array([]), None)
+    with pytest.raises(ValueError, match="max_individual_fdr"):
+        result.add_p_values(100, max_individual_fdr=cutoff)

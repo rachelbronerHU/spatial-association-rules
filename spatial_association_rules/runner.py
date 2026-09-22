@@ -69,7 +69,7 @@ def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
     if output_path is not None:
         _save_config(output_path, settings, dict(
             n_shuffles=n_shuffles, random_seed=random_seed, labels_kept_fixed=list(labels_kept_fixed),
-            min_lift_gain=min_lift_gain, workers=workers,
+            min_lift_gain=min_lift_gain, max_individual_fdr=max_individual_fdr, workers=workers,
         ))
 
     logger.info(f"Mining {len(tasks)} samples" + (f" across {workers} processes" if workers else ""))
@@ -104,6 +104,7 @@ def _run_one(task):
         result = mine(coords, labels, settings, sample_id=sample_id)
         tested = result.add_p_values(
             n_shuffles=n_shuffles, random_seed=seed, labels_kept_fixed=kept_fixed, sample_id=sample_id,
+            max_individual_fdr=max_individual_fdr,
         )
         classified = filter_rules(tested, min_lift_gain=min_lift_gain,
                                   max_individual_fdr=max_individual_fdr)

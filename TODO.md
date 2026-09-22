@@ -34,7 +34,6 @@ Order matters: section 1 first, then 2, then the rest.
 | 11 | `min_lift_gain` and `max_individual_fdr` are never checked | `complex_rules.py:42` |
 | 12 | `strip_role` mangles a label that itself contains `_CENTER` or `_NEIGHBOR` | `transactions.py:25` |
 | 13 | `run_samples` sets up logging when called. A library should leave that to the caller. | `runner.py:60` |
-| 14 | `run_config.json` leaves out `max_individual_fdr`, even though it changes the results | `runner.py:70-73` |
 | 15 | An import sits inside a function to dodge a loop between two files | `rules.py:203` |
 
 ## 4. Writing

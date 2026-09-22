@@ -72,20 +72,49 @@ filtering.
 ## Testing many rules at once
 
 Searching many rules makes chance findings more likely. `add_p_values()` returns
-raw `p_value` and `individual_fdr`, corrected with Benjamini-Hochberg for each sample.
+the raw `p_value` and a corrected value, `individual_fdr`. The correction uses
+[Benjamini-Hochberg (BH)](https://doi.org/10.1111/j.2517-6161.1995.tb02031.x),
+separately for each sample and rule size. Size counts items on both sides of a
+rule. Attraction and avoidance rules of the same size are corrected together.
 
-The correction counts all rule combinations allowed by the maximum rule size and
-minimum cell-count/share settings, before support or effect filtering. Attraction
-and avoidance count separately when both searches are enabled.
+All allowed rules count, even those the search dropped. For example, if the search
+keeps 20 of 1,000 possible rules of one size, the correction counts all 1,000.
+Only the 20 kept rules are shuffled; the other 980 count as p = 1, with no extra
+rows. The allowed rules depend on the maximum rule size and minimum cell-count/share
+settings. Counting only the kept rules would ignore the wider search that found them.
+See [Hämäläinen and Webb (2019), §6](https://doi.org/10.1007/s10618-018-0590-x).
 
-For example, if 20 rules pass mining out of 1,000 candidates, FDR counts all 1,000.
-Only the 20 mined rules are shuffled; the other 980 count as p = 1 without extra
-shuffles or rows. Passing a smaller list with `rules=` keeps the same total count.
-Omitted candidates and supplied rules not mined in this sample count as p = 1.
+The raw p-value is `(s + 1) / (B + 1)`: `s` is how many shuffles pass the rule's
+thresholds, and `B` is the number of shuffles. Adding one prevents zero p-values
+([Phipson and Smyth, 2010](https://gksmyth.github.io/pubs/PermPValuesPreprint.pdf)).
+The smallest possible p-value is therefore `1 / (B + 1)`.
 
-This correction supports claims about one sample. Claims about patterns recurring
-across a study need a separate analysis and correction. The shuffle assumptions
-and BH's assumptions about dependence between rules still need to hold.
+With `max_individual_fdr=q`, the library checks whether enough shuffles are planned.
+Let `m` be the number of allowed rules of one size and `R` the number kept by the
+search. The best case is that all `R` rules get the smallest possible p-value.
+Using the BH formula gives:
+
+```
+best possible adjusted value = min(1, m / (R * (B + 1)))
+minimum shuffles that could be enough = ceil(m / (q * R)) - 1   (R > 0, 0 < q < 1)
+```
+
+Here `ceil` means round up. This shuffle limit is derived here from BH. If even
+the best case exceeds `q`, the library warns and leaves that size's corrected
+values as `NaN` (missing). Raw p-values are still calculated. More shuffles make
+passing possible, but do not guarantee it. `R` counts rules after all search filters.
+Empty groups need no check. A cutoff of 1 needs no minimum because corrected values
+cannot exceed 1. `None` skips the check but still calculates corrected values.
+
+Grouping by size is our choice; BH does not require it. The correction applies to
+each group separately. Combining sizes or samples has no automatic false discovery
+rate (FDR) guarantee. For background on separate groups, see
+[Sun et al. (2006)](https://utstat.utoronto.ca/craiu/Papers/strat-FDR.pdf).
+
+The shuffle test and BH also rely on statistical assumptions. BH requires independent
+tests or a particular form of dependence called PRDS
+([Hämäläinen and Webb, §6.2](https://doi.org/10.1007/s10618-018-0590-x)).
+Rules share cell types and can be related; we have not proved they meet this condition.
 
 ## Support from bits
 
@@ -111,9 +140,15 @@ not. Nothing is dropped — four columns are added:
 - `adds_information` — the one column to filter on
 - `simpler_rules` — exactly what it was weighed against
 
-Classification uses `individual_fdr` from `add_p_values()`, which counts all allowed
-rules regardless of class. *Significant* below means
-`individual_fdr ≤ max_individual_fdr`. Without that column, lift decides alone.
+Classification reads the corrected p-values from `add_p_values()`.
+*Significant* below means `individual_fdr ≤ max_individual_fdr`.
+With a cutoff set, a shorter rule with a missing value (`None`/`NaN`) cannot
+dismiss a longer rule. Classification still runs and may assign `simpler_are_noise`
+or `consequent_is_noise`, both with `adds_information=True`. A longer rule's own
+missing FDR does not stop classification either: shorter rules with passing FDR
+can still mark it redundant. If the cutoff is `None` or the whole column is absent,
+only lift (effect strength) is used. All rows are returned; each rule's own
+corrected p-value still needs to be checked before calling it significant.
 
 ### The decision tree
 
@@ -186,17 +221,12 @@ has one of them as its center.
 
 ### Notes
 
-- **`adds_information` is about redundancy, not evidence.** `simpler_are_noise` means
-  the *shorter* rules failed the threshold, not that this rule is weak. Filter
-  `individual_fdr` separately — it applies to every class alike.
+- **`adds_information` tells you whether shorter rules already explain a rule.**
+  `simpler_are_noise` means the shorter rules failed the cutoff or had missing
+  corrected p-values. Check the longer rule's own `individual_fdr` separately.
 - **A rule the consequent question claimed is not re-asked** the shorter-rule
   question, so a few rules that question would have caught are kept instead.
-- **`max_individual_fdr=None`** takes lift at its word: every rule counts as
-  convincing. Same when there are no p-values.
-- **`n_shuffles` has to be large enough.** With 1000 shuffles, the smallest possible
-  p-value is about 0.001. Too few shuffles can prevent rules from passing FDR,
-  even when no shuffle passes their thresholds.
-- **Sub-rules and their longer rules are positively correlated**, not independent. BH
-  holds under positive dependence (PRDS) — an assumption, not a free lunch.
+- For the shuffle count and statistical assumptions, see
+  [Testing many rules at once](#testing-many-rules-at-once).
 
 Reference: [Bayardo et al., *Constraint-Based Rule Mining in Large, Dense Databases*](https://www.bayardo.org/ps/icde99.pdf)

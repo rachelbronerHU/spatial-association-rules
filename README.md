@@ -56,7 +56,7 @@ settings = Settings(weighting=Weighting.WEIGHTED, method=Method.CN,
                     avoidance_max_lift=0.8)
 
 result = mine(coords, labels, settings)
-tested = result.add_p_values(n_shuffles=1000, random_seed=42)
+tested = result.add_p_values(n_shuffles=1000, random_seed=42, max_individual_fdr=0.05)
 rules  = filter_rules(tested, min_lift_gain=1.1, max_individual_fdr=0.05)
 
 print(rules[["antecedents", "consequents", "kind", "lift", "p_value"]])
@@ -114,7 +114,7 @@ One row per rule. `mine` gives the first block, `add_p_values` the second,
 | `confidence`, `lift`, `leverage`, `conviction` | how strong it is. `lift > 1` attracts, `< 1` avoids |
 | `len_ant`, `len_con` | items on each side |
 | `p_value` | raw p-value from the shuffle test |
-| `individual_fdr` | p-value corrected for all allowed rules in this sample |
+| `individual_fdr` | p-value corrected for testing many rules, grouped by sample and rule size; `NaN` (missing) when too few shuffles can meet the chosen cutoff |
 | `rule_type` | `pairwise`, `ant-complex`, `con-complex`, `both-complex` |
 | `complex_class` | why the rule was kept or dismissed ([how](DESIGN.md#complex-rules-classification)) |
 | `adds_information` | the one column to filter on: does this rule say anything a shorter one did not? |
@@ -171,18 +171,27 @@ threshold is not applied, so a rule is only dropped for a reason you asked for.
 | `n_shuffles` | **required.** The smallest possible p-value is `1/(n_shuffles+1)`, so 5 shuffles can never reach 0.05 |
 | `random_seed` | fix it and re-runs give identical p-values |
 | `labels_kept_fixed` | labels that never move. `"Name"` is exact; `"Name*"` matches anything starting with Name, so `"CD4*"` also catches `CD45` |
+| `max_individual_fdr` | chosen cutoff, greater than 0 and at most 1. Checks whether enough shuffles are planned. Use the same cutoff in `filter_rules`. Default `None` skips this check but still calculates corrected p-values |
 
-FDR counts all rules allowed by your settings, including those mining dropped.
-Dropped rules count as p = 1, with no extra shuffles or rows. Passing a smaller
-list with `rules=` keeps the same total count.
-[Why this matters](DESIGN.md#testing-many-rules-at-once).
+Testing many rules increases the risk of chance findings. The correction accounts
+for all allowed rules, including those the search dropped. It groups rules by
+sample and size: two-item rules together, three-item rules together, and so on.
+Each group includes both attraction and avoidance rules.
 
-Two things it will not fudge:
+With `max_individual_fdr` set, the library warns before shuffling if even the best
+possible result cannot meet the cutoff. Those rule sizes still get raw p-values,
+but their `individual_fdr` is `NaN` (missing). More shuffles are needed to have any
+chance of passing. See [DESIGN](DESIGN.md#testing-many-rules-at-once) for details.
 
-- pin so much with `labels_kept_fixed` that nothing is left to shuffle → **raises**,
-  rather than returning 1.0 everywhere and looking like a real negative
-- a rule naming a cell type this sample does not have → `p_value = 1.0`. It was never
-  tested, and "never survived" is not the same as "best result in the run"
+`filter_rules` checks whether shorter rules already explain a longer rule. With a
+cutoff set, a shorter rule with a missing corrected p-value cannot dismiss a longer
+one. Classification still runs: the longer rule may get `simpler_are_noise` or
+`consequent_is_noise` and `adds_information=True`. This does not make it statistically
+significant. If the cutoff is `None` or the whole `individual_fdr` column is absent,
+only lift (effect strength) is used. All rows are returned; check each rule's
+corrected p-value separately before treating it as a finding.
+
+If `labels_kept_fixed` leaves too few cells free to shuffle, testing raises an error.
 
 ### run_samples
 
@@ -192,7 +201,7 @@ Two things it will not fudge:
 | `workers` | `None` runs here. An integer runs that many **processes** — mining is CPU-bound. On Windows, guard the caller with `if __name__ == "__main__"` |
 | `output_path` | where to write `run_config.json`. `None` writes nothing |
 | `min_lift_gain` | how much better a longer rule must be to earn its place |
-| `max_individual_fdr` | how significant a rule must be before it can condemn a longer one. `None` skips the check |
+| `max_individual_fdr` | same cutoff for checking the shuffle count and deciding whether shorter rules can dismiss longer ones. `None` skips both checks but still calculates corrected p-values |
 
 Each sample derives its own seed from `random_seed`, so a parallel run matches a serial
 one.
