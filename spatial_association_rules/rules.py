@@ -11,6 +11,7 @@ from math import comb
 import numpy as np
 import pandas as pd
 
+from .complex_rules import DEFAULT_IMPROVEMENT_GAIN, classify_complex_rules
 from .transactions import is_center, strip_role
 
 ATTRACTS = "attracts"
@@ -194,13 +195,11 @@ def metrics(support, ant_support, con_support):
 
 # --- from itemset to rule --------------------------------------------------
 
-def splits_of(itemset):
-    """
-    Every way of reading an itemset as a rule, as (antecedent, consequent) pairs.
-
-    The center item goes on the left and never on the right.
-    """
+def splits_of(itemset, one_sided_complex_rules=True):
+    """Allowed (antecedent, consequent) splits, with the center on the left."""
     for size in range(1, len(itemset)):
+        if one_sided_complex_rules and size > 1 and len(itemset) - size > 1:
+            continue
         for antecedent in combinations(sorted(itemset), size):
             antecedent = frozenset(antecedent)
             consequent = itemset - antecedent
@@ -275,11 +274,16 @@ def labels_with_enough_cells(labels, settings):
 def count_candidate_rules(labels, settings, n_items=None):
     """Count all possible rules before search filters, optionally for one item count."""
     n_labels = len(labels_with_enough_cells(labels, settings))
-    # Choose one center and r neighbor types. Split neighbors between the two
-    # sides in 2**r ways, excluding the split with nothing on the right.
-    per_center = sum(comb(n_labels, r) * (2**r - 1)
-                     for r in range(1, min(n_labels, settings.max_items_per_rule - 1) + 1)
-                     if n_items is None or r + 1 == n_items)
+    # With one-sided complexity: all neighbors on the right, or just one.
+    # For a single neighbor these are the same split.
+    per_center = 0
+    for r in range(1, min(n_labels, settings.max_items_per_rule - 1) + 1):
+        if n_items is not None and r + 1 != n_items:
+            continue
+        splits = 2**r - 1
+        if settings.one_sided_complex_rules and r > 1:
+            splits = r + 1
+        per_center += comb(n_labels, r) * splits
     n_kinds = 2 if settings.include_avoidance_rules else 1
     return n_labels * per_center * n_kinds
 
@@ -298,10 +302,11 @@ def drop_rare_labels(rules, labels, settings):
     return rules[keep]
 
 
-def filter_rules(rules, min_lift_gain=None, max_individual_fdr=None):
-    """Classify complex rules to redundant (with no additional value to simpler rule) vs informative."""
-    if min_lift_gain is None:
-        min_lift_gain = 1.0
-    from .complex_rules import classify_complex_rules
-    return classify_complex_rules(rules, min_lift_gain, max_individual_fdr)
+def classify_rules(rules, min_lift_gain=DEFAULT_IMPROVEMENT_GAIN, max_individual_fdr=None,
+                   min_consequent_conviction_gain=DEFAULT_IMPROVEMENT_GAIN):
+    """Classify all rows: antecedents by lift, consequents by conviction, mixed untested."""
+    return classify_complex_rules(rules, min_lift_gain, max_individual_fdr,
+                                  min_consequent_conviction_gain)
 
+
+filter_rules = classify_rules  # Compatibility with the original public name.

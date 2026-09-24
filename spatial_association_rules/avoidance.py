@@ -164,6 +164,8 @@ def mine_avoidance(matrix, item_index, settings, sample_id: str = ""):
                 break
             if len(ant_items) + len(con_items) > settings.max_items_per_rule:
                 continue
+            if settings.one_sided_complex_rules and len(ant_items) > 1 and len(con_items) > 1:
+                continue
             if set(ant_items) & set(con_items):
                 continue
             pairs.append((frozenset(ant_items), frozenset(con_items), ant_support, con_support))

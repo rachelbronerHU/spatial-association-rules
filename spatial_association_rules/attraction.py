@@ -63,7 +63,7 @@ def mine_attraction(transactions, matrix, item_index, settings):
     for itemset, support in supports.items():
         if len(itemset) < 2:
             continue
-        for antecedent, consequent in splits_of(itemset):
+        for antecedent, consequent in splits_of(itemset, settings.one_sided_complex_rules):
             ant_support = supports.get(antecedent, 0.0)
             con_support = supports.get(consequent, 0.0)
             if ant_support <= 0 or con_support <= 0:

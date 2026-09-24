@@ -42,7 +42,7 @@ One sample, start to finish:
 
 ```python
 import numpy as np
-from spatial_association_rules import Settings, Weighting, Method, mine, filter_rules
+from spatial_association_rules import Settings, Weighting, Method, mine, classify_rules
 
 # Made-up tissue: 20 clumps, each of one cell type, and Paneth scattered everywhere.
 rng    = np.random.default_rng(0)
@@ -57,7 +57,7 @@ settings = Settings(weighting=Weighting.WEIGHTED, method=Method.CN,
 
 result = mine(coords, labels, settings)
 tested = result.add_p_values(n_shuffles=1000, random_seed=42, max_individual_fdr=0.05)
-rules  = filter_rules(tested, min_lift_gain=1.1, max_individual_fdr=0.05)
+rules  = classify_rules(tested, max_individual_fdr=0.05)
 
 print(rules[["antecedents", "consequents", "kind", "lift", "p_value"]])
 ```
@@ -103,7 +103,7 @@ Results come back as DataFrames.
 ## What comes back
 
 One row per rule. `mine` gives the first block, `add_p_values` the second,
-`filter_rules` the third, and `run_samples` adds `sample_id`.
+`classify_rules` the third, and `run_samples` adds `sample_id`.
 
 | column | what it is |
 |---|---|
@@ -115,9 +115,9 @@ One row per rule. `mine` gives the first block, `add_p_values` the second,
 | `len_ant`, `len_con` | items on each side |
 | `p_value` | raw p-value from the shuffle test |
 | `individual_fdr` | p-value corrected for testing many rules, grouped by sample and rule size; `NaN` (missing) when too few shuffles can meet the chosen cutoff |
-| `rule_type` | `pairwise`, `ant-complex`, `con-complex`, `both-complex` |
+| `rule_type` | `pairwise`, `complex-antecedents`, `complex-consequents`, `complex-mixed` |
 | `complex_class` | why the rule was kept or dismissed ([how](DESIGN.md#complex-rules-classification)) |
-| `adds_information` | the one column to filter on: does this rule say anything a shorter one did not? |
+| `adds_information` | whether the rule passes the simpler-rule comparison; missing for unclassified mixed rules |
 | `simpler_rules` | what it was weighed against |
 | `sample_id` | which sample, from `run_samples` only |
 
@@ -131,7 +131,7 @@ One row per rule. `mine` gives the first block, `add_p_values` the second,
 | 4 | `attraction.py`, `avoidance.py` | two searches, one per claim — see below |
 | 5 | `rules.py` | measure and judge. Rules naming a too-rare cell type are dropped |
 | 6 | `validation/significance.py` | shuffle the labels, see how often the rule still passes → `p_value` |
-| 7 | `rules.py` | label rules a shorter rule already said (`filter_rules`) |
+| 7 | `rules.py` | label rules a shorter rule already said (`classify_rules`) |
 
 Every step runs per sample. Nothing is pooled across samples: the library gives no
 dataset-wide answer.
@@ -140,8 +140,8 @@ dataset-wide answer.
 
 ### Settings
 
-Fields without a default must be chosen. Everything else defaults to `None` — that
-threshold is not applied, so a rule is only dropped for a reason you asked for.
+Required fields must be chosen. Other defaults are listed below; an optional
+threshold set to `None` is not applied.
 
 | | required | what it is |
 |---|---|---|
@@ -151,6 +151,7 @@ threshold is not applied, so a rule is only dropped for a reason you asked for.
 | `min_support` | **yes** | how often a pattern must appear. `0` never terminates |
 | `min_lift` | **yes** | what counts as attraction. Must be `>= 1` ([why it is required](DESIGN.md#why-the-two-lift-thresholds-are-required)) |
 | `max_items_per_rule` | **yes** | longest rule to build, 2 to 5 |
+| `one_sided_complex_rules` | | default `True`: only one side may contain multiple items. `False` also mines mixed rules, which remain unclassified |
 | `avoidance_max_lift` | **when avoidance is on** | what counts as avoidance. Must be `< 1` ([why it is required](DESIGN.md#why-the-two-lift-thresholds-are-required)) |
 | `bandwidth` | | distance at which a neighbor counts ~0.6. Unset, it follows `radius` |
 | `k_neighbors` | for `KNN_R` | how many neighbors to take |
@@ -171,27 +172,71 @@ threshold is not applied, so a rule is only dropped for a reason you asked for.
 | `n_shuffles` | **required.** The smallest possible p-value is `1/(n_shuffles+1)`, so 5 shuffles can never reach 0.05 |
 | `random_seed` | fix it and re-runs give identical p-values |
 | `labels_kept_fixed` | labels that never move. `"Name"` is exact; `"Name*"` matches anything starting with Name, so `"CD4*"` also catches `CD45` |
-| `max_individual_fdr` | chosen cutoff, greater than 0 and at most 1. Checks whether enough shuffles are planned. Use the same cutoff in `filter_rules`. Default `None` skips this check but still calculates corrected p-values |
+| `max_individual_fdr` | chosen cutoff, greater than 0 and at most 1. Checks whether enough shuffles are planned. Use the same cutoff in `classify_rules`. Default `None` skips this check but still calculates corrected p-values |
 
 Testing many rules increases the risk of chance findings. The correction accounts
 for all allowed rules, including those the search dropped. It groups rules by
 sample and size: two-item rules together, three-item rules together, and so on.
-Each group includes both attraction and avoidance rules.
+Each group includes both attraction and avoidance rules. The candidate count respects
+`one_sided_complex_rules`, including mixed rules only when it is `False`.
 
 With `max_individual_fdr` set, the library warns before shuffling if even the best
 possible result cannot meet the cutoff. Those rule sizes still get raw p-values,
 but their `individual_fdr` is `NaN` (missing). More shuffles are needed to have any
 chance of passing. See [DESIGN](DESIGN.md#testing-many-rules-at-once) for details.
 
-`filter_rules` checks whether shorter rules already explain a longer rule. With a
-cutoff set, a shorter rule with a missing corrected p-value cannot dismiss a longer
-one. Classification still runs: the longer rule may get `simpler_are_noise` or
-`consequent_is_noise` and `adds_information=True`. This does not make it statistically
-significant. If the cutoff is `None` or the whole `individual_fdr` column is absent,
-only lift (effect strength) is used. All rows are returned; check each rule's
-corrected p-value separately before treating it as a finding.
-
 If `labels_kept_fixed` leaves too few cells free to shuffle, testing raises an error.
+
+### classify_rules
+
+Returns every row, with a type and a simpler-rule classification. `kind` still means
+`attracts` or `avoids`. `filter_rules` remains an alias for compatibility.
+
+| parameter | what it is |
+|---|---|
+| `min_lift_gain` | minimum lift ratio for complex antecedents; default `1.1` |
+| `min_consequent_conviction_gain` | minimum conviction ratio for complex consequents; default `1.1` |
+| `max_individual_fdr` | simpler rules must pass this cutoff to block a complex rule; `None` uses effects alone |
+
+Both gains accept `None` or `0` for any strict improvement, or a finite ratio `>= 1`.
+Simpler rules can be attraction or avoidance. The **complex rule's kind** sets the
+direction: attraction requires at least `simpler * gain`; avoidance requires at most
+`simpler / gain`. These are ratios, not absolute differences. Ties never count as
+improvement, including two infinities.
+The rule must beat **every** qualifying simpler rule. Antecedents use lift;
+consequents use conviction.
+
+For example, complex attraction lift `1.4` beats simpler avoidance lift `0.8` at
+gain `1.1`, because `1.4 >= 0.8 * 1.1`. A change of kind must still meet the gain.
+
+| `complex_class` | meaning | `adds_information` |
+|---|---|---|
+| `no_simpler` | no simpler rule passed mining thresholds | `True` |
+| `no_significant_simpler` | simpler rules exist, but none passes the FDR cutoff | `True` |
+| `stronger_than_simpler` | beats every qualifying simpler rule by the chosen metric and gain | `True` |
+| `redundant_by_simpler` | fails to beat at least one qualifying simpler rule | `False` |
+
+Pairwise rules have no class and `adds_information=True`. Mixed rules have no class
+and a missing `adds_information` value. To select only rows marked informative, use
+`rules[rules["adds_information"].fillna(False)]`; select mixed rules separately by
+`rule_type` if you want to evaluate them yourself.
+
+For individual rows, check for a missing value before using it as a boolean:
+
+```python
+if pd.notna(row.adds_information) and row.adds_information:
+    ...
+```
+
+Here `pd` is pandas. Plain `if row.adds_information:` raises for an unclassified
+mixed rule because its value is missing.
+
+With an FDR cutoff set, missing corrected values cannot qualify a simpler rule.
+If the whole `individual_fdr` column is absent, comparison uses effects alone, as it
+does with no cutoff. A complex rule's own FDR does not decide its class: check it
+separately. `adds_information=True` means the rule survives this comparison, not that
+its additional value is statistically established. There is no improvement significance
+test. See [DESIGN](DESIGN.md#complex-rules-classification) for matching and references.
 
 ### run_samples
 
@@ -200,7 +245,8 @@ If `labels_kept_fixed` leaves too few cells free to shuffle, testing raises an e
 | `samples` | iterable of `(sample_id, coords, labels)`. Not a DataFrame, so no column names are assumed |
 | `workers` | `None` runs here. An integer runs that many **processes** — mining is CPU-bound. On Windows, guard the caller with `if __name__ == "__main__"` |
 | `output_path` | where to write `run_config.json`. `None` writes nothing |
-| `min_lift_gain` | how much better a longer rule must be to earn its place |
+| `min_lift_gain` | lift gain for complex antecedents, as in `classify_rules` |
+| `min_consequent_conviction_gain` | conviction gain for complex consequents, as in `classify_rules`; default `1.1` |
 | `max_individual_fdr` | same cutoff for checking the shuffle count and deciding whether shorter rules can dismiss longer ones. `None` skips both checks but still calculates corrected p-values |
 
 Each sample derives its own seed from `random_seed`, so a parallel run matches a serial

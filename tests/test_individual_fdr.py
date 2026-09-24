@@ -53,15 +53,20 @@ def test_invalid_family_size_is_rejected(n_tests):
         false_discovery_rates([0.01], n_tests=n_tests)
 
 
-@pytest.mark.parametrize("n_labels,max_items,per_kind", [
-    (0, 4, 0), (1, 4, 1), (2, 2, 4), (2, 3, 10), (3, 4, 57), (4, 5, 260),
+@pytest.mark.parametrize("n_labels,max_items,restricted,unrestricted", [
+    (0, 4, 0, 0), (1, 4, 1, 1), (2, 2, 4, 4), (2, 3, 10, 10),
+    (3, 4, 48, 57), (4, 5, 172, 260),
 ])
 @pytest.mark.parametrize("avoidance", [False, True])
-def test_candidate_family_counts_centers_neighbor_splits_and_kinds(n_labels, max_items, per_kind, avoidance):
+@pytest.mark.parametrize("one_sided", [False, True])
+def test_candidate_family_counts_centers_neighbor_splits_and_kinds(
+        n_labels, max_items, restricted, unrestricted, avoidance, one_sided):
     settings = Settings(weighting=Weighting.BINARY, method=Method.CN, radius=1,
                         min_support=0.1, min_lift=1.2, max_items_per_rule=max_items,
-                        include_avoidance_rules=avoidance, avoidance_max_lift=0.8)
+                        include_avoidance_rules=avoidance, avoidance_max_lift=0.8,
+                        one_sided_complex_rules=one_sided)
     labels = [str(i) for i in range(n_labels)]
+    per_kind = restricted if one_sided else unrestricted
     assert count_candidate_rules(labels, settings) == per_kind * (2 if avoidance else 1)
 
 
@@ -75,13 +80,17 @@ def test_candidate_family_uses_label_eligibility_but_not_effect_thresholds():
     assert count_candidate_rules(labels, settings.replace(min_label_count=None, min_label_share=0.4)) == 20
 
 
-def test_candidate_counts_by_size_partition_the_full_family():
+@pytest.mark.parametrize("one_sided,expected", [
+    (True, [2048, 95232, 1269760, 11507200]),
+    (False, [2048, 95232, 2222080, 34521600]),
+])
+def test_candidate_counts_by_size_partition_the_full_family(one_sided, expected):
     settings = Settings(weighting=Weighting.BINARY, method=Method.CN, radius=1,
                         min_support=0.1, min_lift=1.2, max_items_per_rule=5,
-                        avoidance_max_lift=0.8)
+                        avoidance_max_lift=0.8, one_sided_complex_rules=one_sided)
     labels = [str(i) for i in range(32)]
     counts = [count_candidate_rules(labels, settings, n_items=k) for k in range(2, 6)]
-    assert counts == [2048, 95232, 2222080, 34521600]  # Both kinds together.
+    assert counts == expected  # Both kinds together.
     assert sum(counts) == count_candidate_rules(labels, settings)
     assert count_candidate_rules(labels, settings.replace(max_items_per_rule=3), n_items=4) == 0
 

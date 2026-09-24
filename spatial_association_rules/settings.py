@@ -1,4 +1,4 @@
-"""How to mine. Nothing here is applied unless you ask for it."""
+"""Mining settings and their defaults."""
 
 from dataclasses import dataclass, replace as _replace
 from enum import Enum
@@ -28,8 +28,8 @@ LONGEST_RULE = 5     # both searches prune by support; this caps how long a rule
 @dataclass(frozen=True)
 class Settings:
     """
-    How to mine. Fields without defaults must be chosen; the rest default to None,
-    meaning that threshold is not applied. See README, "Parameters".
+    How to mine. Fields without defaults must be chosen. Optional thresholds set
+    to None are not applied. See README, "Parameters".
     """
 
     weighting: Weighting
@@ -61,8 +61,11 @@ class Settings:
     min_label_count: Optional[int] = None  # drop rules naming a label this rare
     min_label_share: Optional[float] = None
 
+    one_sided_complex_rules: bool = True      # at most one side may contain multiple items
+
     def __post_init__(self):
         checks = [
+            (isinstance(self.one_sided_complex_rules, bool), "one_sided_complex_rules must be a bool"),
             (self.radius > 0, f"radius must be > 0, got {self.radius}"),
             (0 < self.min_support < 1, f"min_support must be in (0, 1), got {self.min_support}"),
             (self.bandwidth is None or self.bandwidth > 0, f"bandwidth must be > 0, got {self.bandwidth}"),

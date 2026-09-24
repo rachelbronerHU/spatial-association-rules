@@ -366,7 +366,7 @@ def test_runner_forwards_fdr_cutoff_and_preserves_raw_p_values(caplog):
     coords, labels = grid_tissue()
     settings = base()
     expected = mine(coords, labels, settings).add_p_values(n_shuffles=1, random_seed=42)
-    result, failure = _run_one(("FOV1", coords, labels, settings, 1, 42, (), None, 0.05))
+    result, failure = _run_one(("FOV1", coords, labels, settings, 1, 42, (), None, 0.05, 1.1))
     assert failure is None
     assert not result.rules.empty
     np.testing.assert_allclose(result.rules.p_value, expected.p_value)
@@ -714,7 +714,7 @@ def brute_force_avoidance(transactions, settings):
     for itemset, support in supports.items():
         if len(itemset) < 2:
             continue
-        for antecedent, consequent in splits_of(itemset):
+        for antecedent, consequent in splits_of(itemset, settings.one_sided_complex_rules):
             ant_support, con_support = supports[antecedent], supports[consequent]
             if ant_support <= 0 or con_support <= 0:
                 continue
@@ -930,3 +930,42 @@ def test_avoidance_rules_cannot_be_tested_without_their_threshold():
                    labels=result.labels, settings=without)
     with pytest.raises(ValueError, match="avoidance_max_lift"):
         blind.add_p_values(n_shuffles=5)
+
+
+@pytest.mark.parametrize("weighting", [Weighting.BINARY, Weighting.WEIGHTED])
+def test_one_sided_complex_rules_limits_both_searches(weighting):
+    transactions = ([binary("A_CENTER", "X_NEIGHBOR", "Y_NEIGHBOR", "Z_NEIGHBOR")] * 50
+                    + [binary("D_CENTER", "X_NEIGHBOR")] * 50
+                    + [binary("A_CENTER", "W_NEIGHBOR")] * 50
+                    + [binary("D_CENTER", "Y_NEIGHBOR", "Z_NEIGHBOR", "W_NEIGHBOR")] * 50)
+    if weighting is Weighting.WEIGHTED:
+        transactions = [{item: 1.0 if item.endswith("_CENTER") else 0.8
+                         for item in row} for row in transactions]
+    settings = base(weighting=weighting, max_items_per_rule=5)
+    assert settings.one_sided_complex_rules is True
+    restricted = mine_rules(transactions, settings)
+    unrestricted = mine_rules(transactions, settings.replace(one_sided_complex_rules=False))
+
+    for kind in ("attracts", "avoids"):
+        all_rules = unrestricted[unrestricted.kind == kind]
+        mixed = (all_rules.len_ant > 1) & (all_rules.len_con > 1)
+        assert mixed.any(), f"fixture must produce mixed {kind} rules"
+        expected = all_rules[~mixed].reset_index(drop=True)
+        actual = restricted[restricted.kind == kind].reset_index(drop=True)
+        pd.testing.assert_frame_equal(actual, expected)
+
+
+@pytest.mark.parametrize("one_sided,expected", [(True, 4), (False, 7)])
+def test_rule_splits_respect_the_complexity_flag(one_sided, expected):
+    itemset = frozenset(["A_CENTER", "B_NEIGHBOR", "C_NEIGHBOR", "D_NEIGHBOR"])
+    splits = list(splits_of(itemset, one_sided))
+    assert len(splits) == expected
+    assert all("A_CENTER" in ant and not ant & con and ant | con == itemset
+               for ant, con in splits)
+    assert any(len(ant) > 1 and len(con) > 1 for ant, con in splits) == (not one_sided)
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "false"])
+def test_complexity_flag_requires_a_boolean(value):
+    with pytest.raises(ValueError, match="one_sided_complex_rules"):
+        base(one_sided_complex_rules=value)

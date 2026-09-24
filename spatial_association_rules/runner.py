@@ -15,7 +15,8 @@ from typing import List, Tuple
 import pandas as pd
 
 from .mine import mine
-from .rules import filter_rules
+from .complex_rules import DEFAULT_IMPROVEMENT_GAIN
+from .rules import classify_rules
 from .settings import Settings
 from .validation.significance import seed_for
 
@@ -44,7 +45,8 @@ class RunReport:
 
 
 def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
-                labels_kept_fixed=(), min_lift_gain=None, max_individual_fdr=None,
+                labels_kept_fixed=(), min_lift_gain=DEFAULT_IMPROVEMENT_GAIN, max_individual_fdr=None,
+                min_consequent_conviction_gain=DEFAULT_IMPROVEMENT_GAIN,
                 workers=None, output_path=None) -> RunReport:
     """
     Mine every sample and report what came back, with raw p-values and nothing cut.
@@ -60,7 +62,7 @@ def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
     setup_console_logging()
     tasks = [
         (sample_id, coords, labels, settings, n_shuffles, seed_for(random_seed, sample_id),
-         tuple(labels_kept_fixed), min_lift_gain, max_individual_fdr)
+         tuple(labels_kept_fixed), min_lift_gain, max_individual_fdr, min_consequent_conviction_gain)
         for sample_id, coords, labels in samples
     ]
     if not tasks:
@@ -70,6 +72,7 @@ def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
         _save_config(output_path, settings, dict(
             n_shuffles=n_shuffles, random_seed=random_seed, labels_kept_fixed=list(labels_kept_fixed),
             min_lift_gain=min_lift_gain, max_individual_fdr=max_individual_fdr, workers=workers,
+            min_consequent_conviction_gain=min_consequent_conviction_gain,
         ))
 
     logger.info(f"Mining {len(tasks)} samples" + (f" across {workers} processes" if workers else ""))
@@ -99,15 +102,17 @@ def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
 
 def _run_one(task):
     """One sample. Returns (result, None) or (None, (sample_id, traceback))."""
-    sample_id, coords, labels, settings, n_shuffles, seed, kept_fixed, min_lift_gain, max_individual_fdr = task
+    (sample_id, coords, labels, settings, n_shuffles, seed, kept_fixed,
+     min_lift_gain, max_individual_fdr, min_consequent_conviction_gain) = task
     try:
         result = mine(coords, labels, settings, sample_id=sample_id)
         tested = result.add_p_values(
             n_shuffles=n_shuffles, random_seed=seed, labels_kept_fixed=kept_fixed, sample_id=sample_id,
             max_individual_fdr=max_individual_fdr,
         )
-        classified = filter_rules(tested, min_lift_gain=min_lift_gain,
-                                  max_individual_fdr=max_individual_fdr)
+        classified = classify_rules(tested, min_lift_gain=min_lift_gain,
+                                  max_individual_fdr=max_individual_fdr,
+                                  min_consequent_conviction_gain=min_consequent_conviction_gain)
 
         logger.info(f"[{sample_id}] {result.stats['patches_kept']} transactions, "
                     f"{len(result.rules)} mined, "

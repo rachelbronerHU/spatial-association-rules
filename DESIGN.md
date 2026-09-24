@@ -81,7 +81,7 @@ All allowed rules count, even those the search dropped. For example, if the sear
 keeps 20 of 1,000 possible rules of one size, the correction counts all 1,000.
 Only the 20 kept rules are shuffled; the other 980 count as p = 1, with no extra
 rows. The allowed rules depend on the maximum rule size and minimum cell-count/share
-settings. Counting only the kept rules would ignore the wider search that found them.
+settings, and `one_sided_complex_rules`. Counting only the kept rules would ignore the wider search that found them.
 See [Hämäläinen and Webb (2019), §6](https://doi.org/10.1007/s10618-018-0590-x).
 
 The raw p-value is `(s + 1) / (B + 1)`: `s` is how many shuffles pass the rule's
@@ -132,101 +132,105 @@ Both give the same answer, and a test proves it.
 
 ## Complex rules classification
 
-A rule with 3 or more items is asked whether it adds anything its shorter parts did
-not. Nothing is dropped — four columns are added:
+`Settings.one_sided_complex_rules=True` permits multiple items on only one side.
+Both searches enforce this before measuring candidate rules. Set it to `False`
+to also mine mixed rules. The full candidate count used for FDR follows this setting:
+for one center and `r` chosen neighbor types, there are `2**r - 1` unrestricted
+splits. With one-sided complexity there are `r + 1` splits for `r >= 2`, and one
+for `r = 1` (the two possible descriptions of that split coincide).
 
-- `rule_type` — `pairwise`, `ant-complex`, `con-complex`, `both-complex`
-- `complex_class` — why the rule was kept or dismissed, `None` for pairwise
-- `adds_information` — the one column to filter on
-- `simpler_rules` — exactly what it was weighed against
+`classify_rules` returns every row with four classification columns:
 
-Classification reads the corrected p-values from `add_p_values()`.
-*Significant* below means `individual_fdr ≤ max_individual_fdr`.
-With a cutoff set, a shorter rule with a missing value (`None`/`NaN`) cannot
-dismiss a longer rule. Classification still runs and may assign `simpler_are_noise`
-or `consequent_is_noise`, both with `adds_information=True`. A longer rule's own
-missing FDR does not stop classification either: shorter rules with passing FDR
-can still mark it redundant. If the cutoff is `None` or the whole column is absent,
-only lift (effect strength) is used. All rows are returned; each rule's own
-corrected p-value still needs to be checked before calling it significant.
+- `rule_type`: `pairwise`, `complex-antecedents`, `complex-consequents`, `complex-mixed`.
+  Types count items, so a center and a neighbor of the same cell type count separately.
+- `complex_class`: the decision below; unset for pairwise and mixed rules.
+- `adds_information`: whether the rule survives comparison; missing for mixed rules.
+- `simpler_rules`: every matching mined simpler rule, including those failing FDR.
+  Mixed rules have an empty list because they are not evaluated.
 
-### The decision tree
+### The decision
 
-**Shortest rules first**, so a rule is only ever weighed against shorter ones already
-judged:
+Pairwise rules have `adds_information=True`. Mixed rules are left for the caller to
+analyze. For either one-sided complex type:
 
-```
-2 items ....................................... pairwise, keep. done.
+1. Find all mined simpler rules of either `kind`, keeping the single-item side
+   fixed and dropping one or more items from the complex side.
+2. If none exist: `no_simpler`, `adds_information=True`.
+3. Keep those with `individual_fdr <= max_individual_fdr`. If none qualify:
+   `no_significant_simpler`, `adds_information=True`.
+4. Compare the complex rule with every qualifying simpler rule. If all comparisons
+   pass: `stronger_than_simpler`, `adds_information=True`. Otherwise:
+   `redundant_by_simpler`, `adds_information=False`.
 
-do the consequents already do this to each other?
-├─ every consequent pair backed by a two-item rule
-│  of the same kind, at least as strong?
-│  ├─ yes, and every backing rule significant . consequent_driven    DROP
-│  ├─ yes, but one rests on noise ............. consequent_is_noise  KEEP
-│  └─ no ...................................... fall through
-└─ one consequent only ........................ fall through
+A simpler rule still counts if it was itself classified redundant. Classification
+is independent of row order and does not change any p-values or FDR values.
+There is no separate check for associations between consequent items.
 
-shorter rules = every rule contained in this one,
-                one item left on each side
+With a cutoff set, missing FDR values fail the gate. No cutoff, or no
+`individual_fdr` column at all, means effects alone are compared. A complex rule's
+own FDR is separate from this classification and should still be checked.
 
-├─ none were mined ............................ new                  KEEP
-├─ beats every one by min_lift_gain ........... stronger_effect      KEEP
-└─ matched at least one
-   ├─ any matched one is significant .......... redundant_by_simpler DROP
-   └─ none is ................................. simpler_are_noise    KEEP
-```
+### Comparing effects
 
-`A + B → C + D` answers to `A → C`, `A + B → C`, `A → C + D` and the rest — every rule
-inside it, not only the next size down, since a rule two sizes down can be the strongest
-while the one between collapsed. A dismissed shorter rule still counts: it is a yardstick,
-not a verdict to inherit, or `new` stops meaning "nothing shorter was mined".
+| complex side | metric | gain parameter | default |
+|---|---|---|---|
+| antecedents | lift | `min_lift_gain` | `1.1` |
+| consequents | conviction | `min_consequent_conviction_gain` | `1.1` |
 
-The correction reads no class, so it runs first and nothing goes in a circle.
+Both gains accept `None` or `0` for any strict improvement, or a finite ratio `>= 1`.
+The complex rule's `kind` sets the direction, regardless of the simpler rule's kind.
+With gain `g`, complex attraction requires `complex >= simpler * g`; complex avoidance
+requires `complex <= simpler / g`. These are ratios, not absolute differences.
+Both also require strict improvement, so equal values never pass, even at zero or
+infinity. A missing metric cannot establish improvement.
 
-`adds_information` is `False` for the two classes marked DROP, and `True` for everything
-else, pairwise rules included.
+For example, complex attraction lift `1.4` beats simpler avoidance lift `0.8` at
+gain `1.1`: `1.4 >= 0.8 * 1.1`. Crossing from avoidance to attraction, or vice versa,
+does not bypass the gain requirement or the simpler rule's FDR gate.
 
-### The consequent question, both ways
+With the consequent fixed, a relative lift gain equals the relative confidence gain.
+Conviction compares prediction failures; for avoidance, lower is stronger. Its lower
+bound depends on consequent support, so a requested reduction may be unattainable.
+Neither comparison is a statistical test of the gain.
 
-Whether the consequents already do to each other what the rule claims the antecedent
-does to them. Every pair of consequent types must be backed, not just one — a niche
-means the whole group hangs together.
+### Matching simpler rules
 
-| rule is | backing rule must be | at least as strong means |
-| --- | --- | --- |
-| `attracts` | `attracts` | pair lift ≥ this rule's — they always cluster, so finding them by the antecedent is not news |
-| `avoids` | `avoids` | pair lift ≤ this rule's — they already exclude each other, so nothing sitting by both is not news |
+The existing cell-type matching is retained: remove `_CENTER` and `_NEIGHBOR` for
+matching, but keep antecedent/consequent direction and repeated types. The `kind`
+does not restrict matching. Thus `Paneth_CENTER +
+Paneth_NEIGHBOR -> Epithelial_NEIGHBOR` is a complex antecedent rule and can match
+`Paneth_CENTER -> Epithelial_NEIGHBOR`. A rule cannot match itself because a simpler
+signature always contains fewer items. All matching arrangements are considered;
+only those passing the FDR gate can block an improvement. `simpler_rules` retains
+the full item names so the comparisons can be read back.
 
-### Counted by item, compared by type
+### Changes from the previous classifier
 
-Two different questions, so two different ways of matching:
+Consequent clustering alone no longer marks a rule redundant. Every qualifying
+simpler rule of either kind is now considered, including previously redundant
+arrangements that the old grouping could skip. Ties do not count as attraction
+improvement at gain 1.
+Both gain defaults are now 1.1. The public name is `classify_rules`; `filter_rules`
+remains an alias. Mixed rules are unclassified, so their `adds_information` is missing.
 
-- **How long is this rule?** By item, roles included. `Paneth_CENTER +
-  Paneth_NEIGHBOR → Epithelial_NEIGHBOR` is three items — the cell in the middle and
-  the cell beside it are two different observations.
-- **Which rule is it up against?** By cell type, role dropped, duplicates kept.
-  That rule answers to `Paneth → Epithelial`, whichever way round the roles fall.
+### Relation to Webb's productivity test
 
-Keeping duplicates is what makes the two agree: the type list is as long as the item
-list, so dropping an item always lands on a genuinely shorter rule.
+This classifier is an effect filter against qualifying mined simpler rules.
+`no_simpler` and `no_significant_simpler` mean no qualifying simpler explanation was
+found; they do not establish that the complex rule adds statistically significant
+information. `redundant_by_simpler` is a filtering decision, not proof of equivalence.
 
-Several arrangements share one signature — `Muscle_NEIGHBOR + Paneth_CENTER →
-Paneth_NEIGHBOR` and `Muscle_CENTER + Paneth_NEIGHBOR → Paneth_NEIGHBOR` both read
-`Muscle, Paneth → Paneth`. One speaks for the group: **rules that earned their place
-first, then the significant ones, then the strongest of those.**
+Webb asks whether adding antecedent conditions improves consequent occurrence within
+observations satisfying the simpler antecedent. The Fisher test in Webb (2006),
+section 3, uses binary transaction counts. The 2019 tutorial, section 4.2, describes
+comparisons against all proper antecedent subsets, without requiring their individual
+significance first. Our classifier does not implement that test: weighted supports
+are fractional and spatial patches overlap. The current individual-rule shuffle
+also does not test conditional improvement. No improvement p-values are reported.
 
-Direction stays in the signature, so `C → A` is not a shorter version of `A → C`. It is
-ignored only in the consequent question, where the rule joining two cell types always
-has one of them as its center.
+References:
 
-### Notes
-
-- **`adds_information` tells you whether shorter rules already explain a rule.**
-  `simpler_are_noise` means the shorter rules failed the cutoff or had missing
-  corrected p-values. Check the longer rule's own `individual_fdr` separately.
-- **A rule the consequent question claimed is not re-asked** the shorter-rule
-  question, so a few rules that question would have caught are kept instead.
-- For the shuffle count and statistical assumptions, see
-  [Testing many rules at once](#testing-many-rules-at-once).
-
-Reference: [Bayardo et al., *Constraint-Based Rule Mining in Large, Dense Databases*](https://www.bayardo.org/ps/icde99.pdf)
+- Geoffrey I. Webb (2006), *Discovering Significant Rules*, KDD, pp. 434-443,
+  section 3. [Local paper](references/fdr%20papers/Discovering%20Significant%20Rules%20Webb.pdf).
+- Wilhelmiina Hämäläinen and Geoffrey I. Webb (2019), *A Tutorial on Statistically
+  Sound Pattern Discovery*, section 4.2. [Published paper](https://doi.org/10.1007/s10618-018-0590-x).

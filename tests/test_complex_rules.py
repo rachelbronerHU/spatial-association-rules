@@ -1,502 +1,275 @@
-"""
-Tests for "does a longer rule earn its place next to its shorter parts".
-
-Every frame is built by hand so the lift and p-value of each rule are known before
-anything runs, and each test pins one branch of the decision tree.
-"""
+"""Classification decisions with independently chosen effects and FDR values."""
 
 import pandas as pd
 import pytest
 
+from spatial_association_rules import classify_rules, filter_rules
 from spatial_association_rules.complex_rules import classify_complex_rules
-from spatial_association_rules.validation.false_discovery import false_discovery_rates
-
-ATTRACTS = "attracts"
-AVOIDS = "avoids"
-
-# Well under the 0.05 gate, and well over it. Nothing is shuffled here, so these are
-# the raw p-values a permutation test would have handed back.
-CONVINCING = 0.0001
-NOISE = 0.9
-
-FDR = 0.05
-GAIN = 1.1
 
 
-def rule(antecedents, consequents, lift, kind=ATTRACTS, p_value=None):
-    row = {
-        "antecedents": tuple(antecedents),
-        "consequents": tuple(consequents),
-        "lift": lift,
-        "kind": kind,
-    }
-    if p_value is not None:
-        row["p_value"] = p_value
-    return row
+def rule(ants, cons, lift=2.0, conviction=2.0, fdr=0.01, kind="attracts"):
+    return dict(antecedents=tuple(ants), consequents=tuple(cons), kind=kind,
+                lift=lift, conviction=conviction, individual_fdr=fdr)
 
 
-def classify(*rows, min_lift_gain=GAIN, max_individual_fdr=FDR):
-    """Classify example rules after correcting their p-values as one test group."""
-    frame = pd.DataFrame(list(rows))
-    if "p_value" in frame.columns:
-        frame["individual_fdr"] = false_discovery_rates(frame["p_value"].values)
-    return classify_complex_rules(frame, min_lift_gain, max_individual_fdr)
+def classify(*rows, **options):
+    options.setdefault("min_lift_gain", 1.1)
+    options.setdefault("max_individual_fdr", 0.05)
+    return classify_rules(pd.DataFrame(rows), **options)
 
 
-def class_of(frame, position):
-    return frame.iloc[position]["complex_class"]
-
-
-# --- shape --------------------------------------------------------------------
-
-def test_pairwise_rules_are_left_alone():
-    """Nothing simpler exists to compare a two-item rule against."""
-    frame = classify(rule(["A_CENTER"], ["B_NEIGHBOR"], lift=2.0, p_value=CONVINCING))
-    assert frame.iloc[0]["rule_type"] == "pairwise"
-    assert frame.iloc[0]["complex_class"] is None
-    assert frame.iloc[0]["adds_information"]
-
-
-def test_an_empty_frame_still_gets_the_columns():
-    """The four this pass adds. individual_fdr comes from add_p_values, not from here."""
-    frame = classify_complex_rules(pd.DataFrame(), GAIN, FDR)
-    for column in ("rule_type", "complex_class", "adds_information", "simpler_rules"):
-        assert column in frame.columns
-
-
-# --- settled on lift alone ----------------------------------------------------
-
-def test_a_rule_with_no_simpler_parts_found_is_new():
-    """A + B -> C, where neither A -> C nor B -> C was mined."""
-    frame = classify(
-        rule(["A_CENTER", "B_CENTER"], ["C_NEIGHBOR"], lift=3.0, p_value=CONVINCING),
+def test_types_and_unclassified_mixed_rules():
+    result = classify(
+        rule(["A_CENTER"], ["C_NEIGHBOR"]),
+        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"]),
+        rule(["A_CENTER"], ["C_NEIGHBOR", "D_NEIGHBOR"]),
+        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR", "D_NEIGHBOR"]),
     )
-    assert frame.iloc[0]["rule_type"] == "ant-complex"
-    assert class_of(frame, 0) == "new"
-    assert frame.iloc[0]["adds_information"]
+    assert result.rule_type.tolist() == ["pairwise", "complex-antecedents",
+                                         "complex-consequents", "complex-mixed"]
+    assert result.complex_class.iloc[0] is None
+    assert result.adds_information.iloc[0]
+    assert result.complex_class.iloc[3] is None
+    assert pd.isna(result.adds_information.iloc[3])
+    assert result.simpler_rules.iloc[3] == []
 
 
-def test_beating_every_simpler_rule_is_a_stronger_effect():
-    """3.0 clears both 2.0 and 1.5 by the 1.1 gain, so the pair says something new."""
-    frame = classify(
-        rule(["A_CENTER", "B_CENTER"], ["C_NEIGHBOR"], lift=3.0, p_value=CONVINCING),
-        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["B_CENTER"], ["C_NEIGHBOR"], lift=1.5, p_value=CONVINCING),
+def test_empty_frame_has_nullable_information_column():
+    result = classify_rules(pd.DataFrame())
+    assert set(result.columns) == {"rule_type", "complex_class", "adds_information", "simpler_rules"}
+    assert str(result.adds_information.dtype) == "boolean"
+
+
+@pytest.mark.parametrize("kind", ["attracts", "avoids"])
+def test_associations_between_consequents_do_not_classify_the_rule(kind):
+    result = classify(
+        rule(["A_CENTER"], ["B_NEIGHBOR", "C_NEIGHBOR"], kind=kind),
+        rule(["B_CENTER"], ["C_NEIGHBOR"], kind=kind),
     )
-    assert class_of(frame, 0) == "stronger_effect"
-    assert frame.iloc[0]["adds_information"]
+    assert result.complex_class.iloc[0] == "no_simpler"
+    assert result.adds_information.iloc[0]
 
 
-def test_avoidance_must_clear_the_strongest_simpler_rule_not_the_weakest():
-    """
-    For avoids, lower lift is stronger, so clearing every sub-rule comes down to the
-    *lowest* of them — the strongest avoidance. Here 0.5 clears B -> C (0.9/1.1 = 0.82)
-    but not A -> C (0.4/1.1 = 0.36), so A -> C is still standing and the rule is left
-    open rather than called an improvement.
-    """
-    frame = classify(
-        rule(["A_CENTER", "B_CENTER"], ["C_NEIGHBOR"], lift=0.5, kind=AVOIDS, p_value=CONVINCING),
-        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=0.4, kind=AVOIDS, p_value=CONVINCING),
-        rule(["B_CENTER"], ["C_NEIGHBOR"], lift=0.9, kind=AVOIDS, p_value=CONVINCING),
+@pytest.mark.parametrize("fdr", [0.9, float("nan"), None, pd.NA])
+@pytest.mark.parametrize("complex_side", ["antecedents", "consequents"])
+def test_no_significant_simpler_precedes_effect_comparison(fdr, complex_side):
+    ants = ["A_CENTER", "B_NEIGHBOR"] if complex_side == "antecedents" else ["A_CENTER"]
+    cons = ["C_NEIGHBOR"] if complex_side == "antecedents" else ["C_NEIGHBOR", "D_NEIGHBOR"]
+    result = classify(
+        rule(ants, cons, lift=10, conviction=10),
+        rule(["A_CENTER"], ["C_NEIGHBOR"], fdr=fdr),
     )
-    assert class_of(frame, 0) == "redundant_by_simpler"
+    assert result.complex_class.iloc[0] == "no_significant_simpler"
+    assert result.adds_information.iloc[0]
+    assert len(result.simpler_rules.iloc[0]) == 1
 
 
-def test_avoidance_below_every_simpler_rule_is_a_stronger_effect():
-    """0.2 clears both 0.36 and 0.82, so it beats the whole field."""
-    frame = classify(
-        rule(["A_CENTER", "B_CENTER"], ["C_NEIGHBOR"], lift=0.2, kind=AVOIDS, p_value=CONVINCING),
-        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=0.4, kind=AVOIDS, p_value=CONVINCING),
-        rule(["B_CENTER"], ["C_NEIGHBOR"], lift=0.9, kind=AVOIDS, p_value=CONVINCING),
+@pytest.mark.parametrize("kind,value,expected", [
+    ("attracts", 2.2, "stronger_than_simpler"),
+    ("attracts", 2.19, "redundant_by_simpler"),
+    ("avoids", 0.4 / 1.1, "stronger_than_simpler"),
+    ("avoids", 0.4, "redundant_by_simpler"),
+])
+def test_antecedents_use_lift_not_conviction(kind, value, expected):
+    result = classify(
+        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"], lift=value, conviction=100, kind=kind),
+        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=2 if kind == "attracts" else 0.4, kind=kind),
     )
-    assert class_of(frame, 0) == "stronger_effect"
+    assert result.complex_class.iloc[0] == expected
+    assert result.adds_information.iloc[0] == (expected == "stronger_than_simpler")
 
 
-def test_consequents_that_already_sit_together_for_real_make_the_rule_redundant():
-    """A -> B + C explains nothing when B and C sit together this strongly, really."""
-    frame = classify(
-        rule(["A_CENTER"], ["B_NEIGHBOR", "C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["B_NEIGHBOR"], ["C_NEIGHBOR"], lift=5.0, p_value=CONVINCING),
+@pytest.mark.parametrize("kind,value,expected", [
+    ("attracts", 2.2, "stronger_than_simpler"),
+    ("attracts", 2.19, "redundant_by_simpler"),
+    ("avoids", 0.8 / 1.1, "stronger_than_simpler"),
+    ("avoids", 0.8, "redundant_by_simpler"),
+])
+def test_consequents_use_default_conviction_gain_not_lift(kind, value, expected):
+    result = classify(
+        rule(["A_CENTER"], ["C_NEIGHBOR", "D_NEIGHBOR"], conviction=value, lift=100, kind=kind),
+        rule(["A_CENTER"], ["C_NEIGHBOR"], conviction=2 if kind == "attracts" else 0.8, kind=kind),
+        min_lift_gain=100,
     )
-    assert frame.iloc[0]["rule_type"] == "con-complex"
-    assert class_of(frame, 0) == "consequent_driven"
-    assert not frame.iloc[0]["adds_information"]
+    assert result.complex_class.iloc[0] == expected
 
 
-def test_one_arrangement_is_enough_for_a_pair_to_count():
-    """Roles are stripped, so C -> B alone still shows B and C sit together."""
-    frame = classify(
-        rule(["A_CENTER"], ["B_NEIGHBOR", "C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["C_CENTER"], ["B_NEIGHBOR"], lift=5.0, p_value=CONVINCING),
+@pytest.mark.parametrize("gain", [None, 0, 1])
+@pytest.mark.parametrize("kind,value,simpler,expected", [
+    ("attracts", 2.001, 2, True), ("attracts", 2, 2, False),
+    ("avoids", 0.799, 0.8, True), ("avoids", 0.8, 0.8, False),
+    ("attracts", float("inf"), float("inf"), False),
+    ("attracts", float("inf"), 2, True), ("avoids", 0, 0, False),
+])
+def test_no_minimum_still_requires_strict_improvement(gain, kind, value, simpler, expected):
+    result = classify(
+        rule(["A_CENTER"], ["C_NEIGHBOR", "D_NEIGHBOR"], conviction=value, kind=kind),
+        rule(["A_CENTER"], ["C_NEIGHBOR"], conviction=simpler, kind=kind),
+        min_consequent_conviction_gain=gain,
     )
-    assert class_of(frame, 0) == "consequent_driven"
+    assert result.adds_information.iloc[0] == expected
 
 
-# --- the consequent link has to be real ---------------------------------------
-
-def test_a_link_that_is_only_noise_lets_the_rule_stand():
-    """B and C look tightly packed, but that packing is a fluke, so it proves nothing."""
-    frame = classify(
-        rule(["A_CENTER"], ["B_NEIGHBOR", "C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["B_NEIGHBOR"], ["C_NEIGHBOR"], lift=5.0, p_value=NOISE),
+@pytest.mark.parametrize("kind,complex_value,strongest,weakest", [
+    ("attracts", 3, 2.9, 1.5), ("avoids", 0.5, 0.4, 0.9),
+])
+def test_must_beat_every_significant_simpler_rule(kind, complex_value, strongest, weakest):
+    result = classify(
+        rule(["A_CENTER"], ["C_NEIGHBOR", "D_NEIGHBOR"], conviction=complex_value, kind=kind),
+        rule(["A_CENTER"], ["C_NEIGHBOR"], conviction=strongest, kind=kind),
+        rule(["A_CENTER"], ["D_NEIGHBOR"], conviction=weakest, kind=kind),
     )
-    assert class_of(frame, 0) == "consequent_is_noise"
-    assert frame.iloc[0]["adds_information"]
+    assert result.complex_class.iloc[0] == "redundant_by_simpler"
 
 
-def test_a_noisy_link_is_not_re_asked_the_simpler_question():
-    """
-    A -> B would have condemned this rule, but the consequent check already claimed it
-    and does not hand it back. Deliberate: the rule keeps consequent_is_noise.
-    """
-    frame = classify(
-        rule(["A_CENTER"], ["B_NEIGHBOR", "C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["B_NEIGHBOR"], ["C_NEIGHBOR"], lift=5.0, p_value=NOISE),
-        rule(["A_CENTER"], ["B_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
+def test_strong_insignificant_simpler_does_not_block_improvement():
+    result = classify(
+        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"], lift=3, fdr=float("nan")),
+        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=10, fdr=0.9),
+        rule(["B_CENTER"], ["C_NEIGHBOR"], lift=2, fdr=0.05),
     )
-    assert class_of(frame, 0) == "consequent_is_noise"
+    assert result.complex_class.iloc[0] == "stronger_than_simpler"
+    assert pd.isna(result.individual_fdr.iloc[0])  # Its own significance is a separate question.
 
 
-def test_a_pair_cannot_borrow_strength_from_one_side_and_evidence_from_the_other():
-    """
-    B -> C is strong but a fluke; C -> B is real but too weak to dismiss anything.
-    Neither arrangement carries both, so the pair does not hold.
-    """
-    frame = classify(
-        rule(["A_CENTER"], ["B_NEIGHBOR", "C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["B_NEIGHBOR"], ["C_NEIGHBOR"], lift=5.0, p_value=NOISE),
-        rule(["C_CENTER"], ["B_NEIGHBOR"], lift=0.5, p_value=CONVINCING),
+def test_every_shorter_size_counts_even_when_the_intermediate_rule_is_redundant():
+    result = classify(
+        rule(["A_CENTER", "B_NEIGHBOR", "D_NEIGHBOR"], ["C_NEIGHBOR"], lift=2.5),
+        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"], lift=2),
+        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=3),
     )
-    assert class_of(frame, 0) == "consequent_is_noise"
+    assert result.complex_class.tolist() == ["redundant_by_simpler", "redundant_by_simpler", None]
+    assert "A_CENTER -> C_NEIGHBOR" in result.simpler_rules.iloc[0]
 
 
-def test_every_pair_of_consequent_types_has_to_be_linked():
-    """
-    B and C sit together, but nothing links either of them to D, so the three of them
-    are not a niche and the rule goes to the ordinary comparison instead.
-    """
-    frame = classify(
-        rule(["A_CENTER"], ["B_NEIGHBOR", "C_NEIGHBOR", "D_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["B_NEIGHBOR"], ["C_NEIGHBOR"], lift=5.0, p_value=CONVINCING),
+def test_matching_preserves_rule_direction_and_repeated_types():
+    result = classify(
+        rule(["A_CENTER", "A_NEIGHBOR"], ["C_NEIGHBOR"]),
+        rule(["C_CENTER"], ["A_NEIGHBOR"]),
     )
-    assert class_of(frame, 0) == "new"
-    assert frame.iloc[0]["adds_information"]
+    assert result.rule_type.iloc[0] == "complex-antecedents"
+    assert result.complex_class.iloc[0] == "no_simpler"
 
 
-def test_one_noisy_pair_out_of_three_is_enough_to_let_the_rule_stand():
-    frame = classify(
-        rule(["A_CENTER"], ["B_NEIGHBOR", "C_NEIGHBOR", "D_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["B_NEIGHBOR"], ["C_NEIGHBOR"], lift=5.0, p_value=CONVINCING),
-        rule(["B_NEIGHBOR"], ["D_NEIGHBOR"], lift=5.0, p_value=CONVINCING),
-        rule(["C_NEIGHBOR"], ["D_NEIGHBOR"], lift=5.0, p_value=NOISE),
+def test_all_role_arrangements_are_compared_by_type():
+    result = classify(
+        rule(["A_CENTER", "A_NEIGHBOR", "B_NEIGHBOR"], ["C_NEIGHBOR"], lift=3),
+        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"], lift=2),
+        rule(["B_CENTER", "A_NEIGHBOR"], ["C_NEIGHBOR"], lift=2.9),
     )
-    assert class_of(frame, 0) == "consequent_is_noise"
+    assert result.complex_class.iloc[0] == "redundant_by_simpler"
 
 
-def test_all_three_pairs_real_makes_it_consequent_driven():
-    frame = classify(
-        rule(["A_CENTER"], ["B_NEIGHBOR", "C_NEIGHBOR", "D_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["B_NEIGHBOR"], ["C_NEIGHBOR"], lift=5.0, p_value=CONVINCING),
-        rule(["B_NEIGHBOR"], ["D_NEIGHBOR"], lift=5.0, p_value=CONVINCING),
-        rule(["C_NEIGHBOR"], ["D_NEIGHBOR"], lift=5.0, p_value=CONVINCING),
-    )
-    assert class_of(frame, 0) == "consequent_driven"
-    assert not frame.iloc[0]["adds_information"]
+def test_effect_only_mode_with_no_cutoff_or_no_fdr_column():
+    rows = [rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"], fdr=0.9),
+            rule(["A_CENTER"], ["C_NEIGHBOR"], fdr=0.9)]
+    assert classify(*rows, max_individual_fdr=None).complex_class.iloc[0] == "redundant_by_simpler"
+    frame = pd.DataFrame(rows).drop(columns="individual_fdr")
+    assert classify_rules(frame, max_individual_fdr=0.05).complex_class.iloc[0] == "redundant_by_simpler"
 
 
-# --- what lift left open, significance settles --------------------------------
-
-def test_matching_a_convincing_simpler_rule_is_redundant():
-    """2.0 does not clear 2.0 by the gain, and A -> C stands up on its own."""
-    frame = classify(
-        rule(["A_CENTER", "B_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-    )
-    assert class_of(frame, 0) == "redundant_by_simpler"
-    assert not frame.iloc[0]["adds_information"]
-
-
-def test_matching_only_noise_keeps_the_complex_rule():
-    """Matching a sub-rule that is itself noise is no reason to throw the pair away."""
-    frame = classify(
-        rule(["A_CENTER", "B_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=NOISE),
-        rule(["B_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=NOISE),
-    )
-    assert class_of(frame, 0) == "simpler_are_noise"
-    assert frame.iloc[0]["adds_information"]
-
-
-def test_one_convincing_match_is_enough_to_make_it_redundant():
-    frame = classify(
-        rule(["A_CENTER", "B_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=NOISE),
-        rule(["B_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-    )
-    assert class_of(frame, 0) == "redundant_by_simpler"
-
-
-def test_without_a_threshold_everything_left_open_reads_redundant():
-    """max_individual_fdr=None is the lift-only behaviour."""
-    frame = classify(
-        rule(["A_CENTER", "B_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=NOISE),
-        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=NOISE),
-        max_individual_fdr=None,
-    )
-    assert class_of(frame, 0) == "redundant_by_simpler"
-
-
-def test_rules_never_corrected_fall_back_to_lift_instead_of_raising():
-    """filter_rules is public, and mine() hands back rules before add_p_values runs."""
-    frame = classify(
-        rule(["A_CENTER", "B_CENTER"], ["C_NEIGHBOR"], lift=2.0),
-        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=2.0),
-    )
-    assert class_of(frame, 0) == "redundant_by_simpler"
-    assert "individual_fdr" not in frame.columns, "nothing was tested, so nothing to correct"
-
-
-@pytest.mark.parametrize("cutoff,expected", [(FDR, "simpler_are_noise"), (None, "redundant_by_simpler")])
-def test_missing_adjustment_does_not_pass_an_enabled_fdr_gate(cutoff, expected):
+def test_input_values_order_and_duplicate_indices_are_preserved():
     frame = pd.DataFrame([
-        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"], lift=2.0),
-        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=2.0),
+        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"], lift=3),
+        rule(["A_CENTER"], ["C_NEIGHBOR"]),
+    ], index=[7, 7])
+    original = frame.copy(deep=True)
+    result = classify_rules(frame, max_individual_fdr=0.05)
+    pd.testing.assert_frame_equal(frame, original)
+    pd.testing.assert_frame_equal(result[original.columns], original)
+    assert result.complex_class.tolist() == ["stronger_than_simpler", None]
+
+
+@pytest.mark.parametrize("parameter", ["min_lift_gain", "min_consequent_conviction_gain"])
+@pytest.mark.parametrize("value", [-1, 0.5, float("nan"), float("inf")])
+def test_invalid_gain_is_rejected(parameter, value):
+    with pytest.raises(ValueError, match=parameter):
+        classify_rules(pd.DataFrame(), **{parameter: value})
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.1, float("nan"), float("inf")])
+def test_invalid_fdr_cutoff_is_rejected(value):
+    with pytest.raises(ValueError, match="max_individual_fdr"):
+        classify_rules(pd.DataFrame(), max_individual_fdr=value)
+
+
+def test_filter_rules_remains_an_alias():
+    assert filter_rules is classify_rules
+
+
+@pytest.mark.parametrize("classify_function", [classify_rules, classify_complex_rules])
+@pytest.mark.parametrize("value,expected", [(2.1, False), (2.2, True)])
+def test_both_default_gains_require_a_tenth_more(classify_function, value, expected):
+    frame = pd.DataFrame([
+        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=2, conviction=2),
+        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"], lift=value),
+        rule(["A_CENTER"], ["C_NEIGHBOR", "D_NEIGHBOR"], conviction=value),
     ])
-    frame["individual_fdr"] = [0.01, float("nan")]
-    classified = classify_complex_rules(frame, GAIN, cutoff)
-    assert class_of(classified, 0) == expected
-    assert pd.isna(classified.iloc[1].individual_fdr)
+    result = classify_function(frame)
+    assert result.adds_information.tolist() == [True, expected, expected]
 
 
-# --- the correction is an input, and every class keeps it ----------------------
+@pytest.mark.parametrize("gain", [None, 0])
+def test_explicit_no_minimum_overrides_both_defaults(gain):
+    frame = pd.DataFrame([
+        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=2, conviction=2),
+        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"], lift=2.001),
+        rule(["A_CENTER"], ["C_NEIGHBOR", "D_NEIGHBOR"], conviction=2.001),
+    ])
+    result = classify_rules(frame, min_lift_gain=gain, min_consequent_conviction_gain=gain)
+    assert result.adds_information.all()
 
-def test_a_dismissed_rule_keeps_its_corrected_value():
-    """
-    Being dismissed settles nothing permanently — a consequent-driven rule can come
-    back once the link is questioned — so its own FDR must survive the pass.
-    """
-    frame = classify(
-        rule(["A_CENTER"], ["B_NEIGHBOR", "C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["B_NEIGHBOR"], ["C_NEIGHBOR"], lift=5.0, p_value=CONVINCING),
+
+@pytest.mark.parametrize("complex_side", ["antecedents", "consequents"])
+@pytest.mark.parametrize("kind,value,simpler,expected", [
+    ("attracts", 1.4, 0.8, "stronger_than_simpler"),
+    ("avoids", 0.8, 1.4, "stronger_than_simpler"),
+    ("attracts", 1.01, 0.99, "redundant_by_simpler"),
+    ("avoids", 0.99, 1.01, "redundant_by_simpler"),
+])
+def test_opposite_kinds_use_the_complex_direction_and_still_require_gain(
+        complex_side, kind, value, simpler, expected):
+    ants = ["A_CENTER", "B_NEIGHBOR"] if complex_side == "antecedents" else ["A_CENTER"]
+    cons = ["C_NEIGHBOR"] if complex_side == "antecedents" else ["C_NEIGHBOR", "D_NEIGHBOR"]
+    opposite = "avoids" if kind == "attracts" else "attracts"
+    result = classify(
+        rule(ants, cons, lift=value, conviction=value, kind=kind),
+        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=simpler, conviction=simpler, kind=opposite),
     )
-    assert class_of(frame, 0) == "consequent_driven"
-    assert not frame["individual_fdr"].isna().any()
+    assert result.complex_class.iloc[0] == expected
+    assert result.adds_information.iloc[0] == (expected == "stronger_than_simpler")
+    assert result.simpler_rules.iloc[0] == ["A_CENTER -> C_NEIGHBOR"]
+    assert result.kind.tolist() == [kind, opposite]
 
 
-def test_everything_worth_keeping_carries_a_corrected_value():
-    """
-    A rule left open by lift keeps its FDR too, so one promoted to simpler_are_noise
-    is never left without a number of its own.
-    """
-    frame = classify(
-        rule(["A_CENTER", "B_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=NOISE),
-        rule(["B_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=NOISE),
+@pytest.mark.parametrize("complex_side", ["antecedents", "consequents"])
+@pytest.mark.parametrize("fdr", [0.9, float("nan")])
+def test_opposite_kind_still_needs_to_pass_fdr(complex_side, fdr):
+    ants = ["A_CENTER", "B_NEIGHBOR"] if complex_side == "antecedents" else ["A_CENTER"]
+    cons = ["C_NEIGHBOR"] if complex_side == "antecedents" else ["C_NEIGHBOR", "D_NEIGHBOR"]
+    result = classify(
+        rule(ants, cons, lift=1.4, conviction=1.4),
+        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=0.8, conviction=0.8, kind="avoids", fdr=fdr),
     )
-    assert class_of(frame, 0) == "simpler_are_noise"
-    kept = frame[frame["adds_information"]]
-    assert not kept["individual_fdr"].isna().any()
+    assert result.complex_class.iloc[0] == "no_significant_simpler"
+    assert result.adds_information.iloc[0]
 
 
-# --- item counts, roles included ----------------------------------------------
-
-def test_the_same_cell_type_twice_is_still_two_items():
-    """
-    Paneth in the middle AND Paneth around it is a three-item rule, not a pairwise
-    one. It has two shorter versions to answer to.
-    """
-    frame = classify(
-        rule(["Paneth_CENTER", "Paneth_NEIGHBOR"], ["Epithelial_NEIGHBOR"], lift=3.0, p_value=CONVINCING),
-        rule(["Paneth_CENTER"], ["Epithelial_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
+@pytest.mark.parametrize("complex_side", ["antecedents", "consequents"])
+@pytest.mark.parametrize("kind,value,same,opposite", [
+    ("attracts", 1.4, 1.5, 0.8), ("avoids", 0.7, 0.6, 1.4),
+])
+def test_beating_opposite_kind_does_not_skip_a_stronger_same_kind_rule(
+        complex_side, kind, value, same, opposite):
+    ants = ["A_CENTER", "B_NEIGHBOR"] if complex_side == "antecedents" else ["A_CENTER"]
+    cons = ["C_NEIGHBOR"] if complex_side == "antecedents" else ["C_NEIGHBOR", "D_NEIGHBOR"]
+    other_ants = ["B_CENTER"] if complex_side == "antecedents" else ["A_CENTER"]
+    other_cons = ["C_NEIGHBOR"] if complex_side == "antecedents" else ["D_NEIGHBOR"]
+    result = classify(
+        rule(ants, cons, lift=value, conviction=value, kind=kind),
+        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=opposite, conviction=opposite,
+             kind="avoids" if kind == "attracts" else "attracts"),
+        rule(other_ants, other_cons, lift=same, conviction=same, kind=kind),
     )
-    assert frame.iloc[0]["rule_type"] == "ant-complex"
-    assert class_of(frame, 0) == "stronger_effect"
-
-
-# --- many items on both sides -------------------------------------------------
-
-def test_a_rule_long_on_both_sides_is_classified_too():
-    """A + B -> C + D is long on both sides at once, and still gets a class."""
-    frame = classify(
-        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR", "D_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-    )
-    assert frame.iloc[0]["rule_type"] == "both-complex"
-    assert class_of(frame, 0) == "new"
-
-
-def test_it_is_weighed_against_shorter_rules_from_either_side():
-    """Items come off the antecedent or the consequent, not just one side."""
-    frame = classify(
-        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR", "D_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["A_CENTER"], ["C_NEIGHBOR", "D_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-    )
-    assert class_of(frame, 0) == "redundant_by_simpler"
-    assert frame.iloc[0]["simpler_rules"] == ["A_CENTER -> C_NEIGHBOR + D_NEIGHBOR"]
-
-
-def test_a_dismissed_shorter_rule_is_still_something_to_answer_to():
-    """
-    A -> C + D is redundant, but it exists, so the longer rule is not 'new'.
-
-    Calling it new would let a rule escape by the accident of its parent being
-    dismissed. It is still weighed on lift, and here it adds nothing.
-    """
-    frame = classify(
-        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR", "D_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["A_CENTER"], ["C_NEIGHBOR", "D_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["A_CENTER"], ["D_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-    )
-    assert class_of(frame, 1) == "redundant_by_simpler"     # A -> C + D falls first
-    assert class_of(frame, 0) == "redundant_by_simpler"     # and still counts against A + B
-    assert frame.iloc[0]["simpler_rules"] != []
-
-
-def test_beating_a_dismissed_shorter_rule_still_earns_a_place():
-    """
-    The dismissed parent is a yardstick, not a verdict to inherit.
-
-    Same rules as above, but the long one triples the lift. Inheriting the parent's
-    redundancy would have thrown away the strongest finding in the sample.
-    """
-    frame = classify(
-        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR", "D_NEIGHBOR"], lift=6.0, p_value=CONVINCING),
-        rule(["A_CENTER"], ["C_NEIGHBOR", "D_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["A_CENTER"], ["D_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-    )
-    assert class_of(frame, 1) == "redundant_by_simpler"
-    assert class_of(frame, 0) == "stronger_effect"
-
-
-def test_a_rule_answers_to_every_shorter_rule_inside_it_not_only_the_next_one_down():
-    """
-    A + B -> C + D beats A -> C + D, but A -> C beats them both.
-
-    One level down is not enough: the middle rule collapsed to lift 1.0, so beating it
-    proves nothing. The two-item rule is inside the four-item rule and must be asked.
-    """
-    frame = classify(
-        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR", "D_NEIGHBOR"], lift=1.5, p_value=CONVINCING),
-        rule(["A_CENTER"], ["C_NEIGHBOR", "D_NEIGHBOR"], lift=1.0, p_value=CONVINCING),
-        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-    )
-    assert class_of(frame, 1) == "redundant_by_simpler"
-    assert class_of(frame, 0) == "redundant_by_simpler"
-    assert "A_CENTER -> C_NEIGHBOR" in frame.iloc[0]["simpler_rules"]
-
-
-def test_shorter_rules_are_judged_before_longer_ones():
-    """The order is by item count, not by row order."""
-    frame = classify(
-        rule(["A_CENTER", "B_CENTER"], ["C_NEIGHBOR"], lift=3.0, p_value=CONVINCING),
-        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-    )
-    assert class_of(frame, 1) is None                       # pairwise, judged first
-    assert class_of(frame, 0) == "stronger_effect"
-
-
-# --- avoidance asks the same question, mirrored -------------------------------
-
-def test_consequents_that_already_exclude_each_other_explain_an_avoidance_rule():
-    """
-    'A keeps away from B and C together' is not news when B and C already keep away
-    from each other — almost nothing sits by both, with or without A.
-    """
-    frame = classify(
-        rule(["A_CENTER"], ["B_NEIGHBOR", "C_NEIGHBOR"], lift=0.5, kind=AVOIDS, p_value=CONVINCING),
-        rule(["B_NEIGHBOR"], ["C_NEIGHBOR"], lift=0.2, kind=AVOIDS, p_value=CONVINCING),
-    )
-    assert class_of(frame, 0) == "consequent_driven"
-
-
-def test_consequents_that_attract_do_not_explain_an_avoidance_rule():
-    """The backing rule has to do the same thing, not the opposite one."""
-    frame = classify(
-        rule(["A_CENTER"], ["B_NEIGHBOR", "C_NEIGHBOR"], lift=0.5, kind=AVOIDS, p_value=CONVINCING),
-        rule(["B_NEIGHBOR"], ["C_NEIGHBOR"], lift=5.0, p_value=CONVINCING),
-    )
-    assert class_of(frame, 0) == "new"
-
-
-def test_a_weaker_avoidance_between_consequents_explains_nothing():
-    """0.9 is barely avoidance; it cannot account for a rule at 0.2."""
-    frame = classify(
-        rule(["A_CENTER"], ["B_NEIGHBOR", "C_NEIGHBOR"], lift=0.2, kind=AVOIDS, p_value=CONVINCING),
-        rule(["B_NEIGHBOR"], ["C_NEIGHBOR"], lift=0.9, kind=AVOIDS, p_value=CONVINCING),
-    )
-    assert class_of(frame, 0) == "new"
-
-
-def test_a_noisy_exclusion_lets_the_avoidance_rule_stand():
-    frame = classify(
-        rule(["A_CENTER"], ["B_NEIGHBOR", "C_NEIGHBOR"], lift=0.5, kind=AVOIDS, p_value=CONVINCING),
-        rule(["B_NEIGHBOR"], ["C_NEIGHBOR"], lift=0.2, kind=AVOIDS, p_value=NOISE),
-    )
-    assert class_of(frame, 0) == "consequent_is_noise"
-    assert frame.iloc[0]["adds_information"]
-
-
-# --- compared by cell type, counted by item -----------------------------------
-
-def test_a_type_named_twice_does_not_let_a_rule_match_itself():
-    """
-    Paneth in the middle and Paneth around it: three items, two of the same type.
-    Dropping one leaves a genuinely shorter rule, never this one again.
-    """
-    frame = classify(
-        rule(["Paneth_CENTER", "Paneth_NEIGHBOR"], ["Epithelial_NEIGHBOR"], lift=3.0, p_value=CONVINCING),
-    )
-    assert frame.iloc[0]["rule_type"] == "ant-complex"
-    assert class_of(frame, 0) == "new"
-
-
-def test_dropping_a_repeated_type_lands_on_the_shorter_rule():
-    frame = classify(
-        rule(["Paneth_CENTER", "Paneth_NEIGHBOR"], ["Epithelial_NEIGHBOR"], lift=3.0, p_value=CONVINCING),
-        rule(["Paneth_CENTER"], ["Epithelial_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-    )
-    assert class_of(frame, 0) == "stronger_effect"
-
-
-def test_the_shorter_rule_is_matched_by_type_whatever_its_roles():
-    """Same two cell types, other way round on centre and neighbour. Still counts."""
-    frame = classify(
-        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["A_NEIGHBOR"], ["C_CENTER"], lift=2.0, p_value=CONVINCING),
-    )
-    assert class_of(frame, 0) == "redundant_by_simpler"
-
-
-def test_direction_still_matters_for_the_shorter_rule():
-    """C -> A is not a shorter version of a rule that reads A -> C."""
-    frame = classify(
-        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["C_CENTER"], ["A_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-    )
-    assert class_of(frame, 0) == "new"
-
-
-# --- one rule speaks for arrangements sharing a type signature ----------------
-
-def test_a_convincing_arrangement_speaks_over_a_louder_fluke():
-    """
-    Two arrangements of the same two types. The loud one is noise, so the believable
-    one speaks for the group — and 3.0 clears its 2.0 comfortably.
-    """
-    frame = classify(
-        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"], lift=3.0, p_value=CONVINCING),
-        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=10.0, p_value=NOISE),
-        rule(["A_NEIGHBOR"], ["C_CENTER"], lift=2.0, p_value=CONVINCING),
-    )
-    assert class_of(frame, 0) == "stronger_effect"
-
-
-def test_the_strongest_convincing_arrangement_is_the_one_to_beat():
-    """Both are believable, so the longer rule has to clear the stronger of them."""
-    frame = classify(
-        rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"], lift=3.0, p_value=CONVINCING),
-        rule(["A_CENTER"], ["C_NEIGHBOR"], lift=2.0, p_value=CONVINCING),
-        rule(["A_NEIGHBOR"], ["C_CENTER"], lift=2.9, p_value=CONVINCING),
-    )
-    assert class_of(frame, 0) == "redundant_by_simpler"
+    assert result.complex_class.iloc[0] == "redundant_by_simpler"
+    assert len(result.simpler_rules.iloc[0]) == 2
