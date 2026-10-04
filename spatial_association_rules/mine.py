@@ -12,10 +12,11 @@ logger = logging.getLogger(__name__)
 
 from .attraction import mine_attraction
 from .avoidance import mine_avoidance
-from .rules import count_candidate_rules, drop_rare_labels, empty_rules, weight_matrix
+from .rules import drop_rare_labels, empty_rules, weight_matrix
 from .settings import Settings
 from .validation.significance import p_values_for
-from .validation.false_discovery import false_discovery_rates, minimum_shuffles_for_fdr
+from .validation.conditional import conditional_p_values, conditional_test_plan
+from .validation.false_discovery import fdr_by_size, fdr_families
 from .transactions import Patch, build_transactions, find_patches, measure_patches
 
 
@@ -56,48 +57,58 @@ class Result:
     settings: Settings = field(repr=False)
 
     def add_p_values(self, n_shuffles, random_seed=None, labels_kept_fixed=(), sample_id="",
-                     max_individual_fdr=None):
+                     max_individual_fdr=None, calculate_fdr=True):
         """
-        Return raw p-values and corrected p-values (individual_fdr) for this sample.
+        Return raw p-values and, if requested, individual_fdr for this sample.
         Correct each rule size separately, with attraction and avoidance together.
 
         Rules dropped by the search count as p=1, without adding rows. With a cutoff
         set, warn if too few shuffles are planned for any rule of a size to pass.
         Those sizes still get raw p-values, but individual_fdr is NaN (missing).
-        A cutoff of None skips this check and still calculates corrected values.
+        A cutoff of None skips this check; calculate_fdr chooses whether to correct.
         """
+        if not isinstance(calculate_fdr, bool):
+            raise ValueError("calculate_fdr must be a bool")
         if max_individual_fdr is not None and not 0 < max_individual_fdr <= 1:
             raise ValueError("max_individual_fdr must be in (0, 1], or None")
+        if not calculate_fdr and max_individual_fdr is not None:
+            raise ValueError("max_individual_fdr requires calculate_fdr=True")
+        labels_kept_fixed = tuple(labels_kept_fixed)
         rules = self.rules.copy()
-        sizes = rules["antecedents"].map(len) + rules["consequents"].map(len)
-        rules["individual_fdr"] = 1.0
-        families = []
-        for size, group in rules.groupby(sizes):
-            n_tests = count_candidate_rules(self.labels, self.settings, n_items=size)
-            if max_individual_fdr is not None:
-                needed = minimum_shuffles_for_fdr(n_tests, len(group), max_individual_fdr)
-                if n_shuffles < needed:
-                    prefix = f"[{sample_id}] " if sample_id else ""
-                    logger.warning(
-                        f"{prefix}Insufficient permutation resolution for {size}-item rules: "
-                        f"{n_tests} candidates, {len(group)} mined, {n_shuffles} shuffles. "
-                        f"At least {needed} shuffles are needed for any possibility of "
-                        f"BH <= {max_individual_fdr}, even with zero shuffle successes. "
-                        "Raw p-values will still be calculated; individual_fdr is NaN."
-                    )
-                    rules.loc[group.index, "individual_fdr"] = np.nan
-                    continue
-            families.append((group.index, n_tests))
-
+        rules.drop(columns="individual_fdr", errors="ignore", inplace=True)
+        if calculate_fdr:
+            # Check before shuffling, so warnings come first.
+            families = fdr_families(rules, self.labels, self.settings, n_shuffles=n_shuffles,
+                                    max_fdr=max_individual_fdr, column="individual_fdr",
+                                    sample_id=sample_id)
         rules["p_value"] = p_values_for(
             rules, self.patches, self.labels, self.settings,
             n_shuffles, random_seed, labels_kept_fixed, sample_id,
         )
-        for index, n_tests in families:
-            rules.loc[index, "individual_fdr"] = false_discovery_rates(
-                rules.loc[index, "p_value"].values, n_tests=n_tests,
-            )
+        if calculate_fdr:
+            rules["individual_fdr"] = fdr_by_size(rules, rules["p_value"], families)
+        rules.attrs["labels_kept_fixed"] = labels_kept_fixed
         return rules
+
+    def conditional_test_plan(self, tested, *, max_individual_fdr=0.05, labels_kept_fixed=()):
+        """Preview comparisons and fixed-type sets. No shuffles are run."""
+        return conditional_test_plan(tested, self.labels, max_individual_fdr, labels_kept_fixed)
+
+    def add_conditional_p_values(self, tested, *, n_shuffles, max_individual_fdr=0.05,
+                                 random_seed=None, labels_kept_fixed=(), sample_id="",
+                                 calculate_fdr=True):
+        """Test gains with simpler types fixed; optionally add conditional_fdr.
+
+        Inherits fixed labels recorded by add_p_values; labels_kept_fixed adds more.
+        Requires individual_fdr to select parents. If correction is requested, warns
+        when too few shuffles can reach the cutoff. See DESIGN.md.
+        """
+        return conditional_p_values(
+            tested, self.patches, self.labels, self.settings, n_shuffles=n_shuffles,
+            max_individual_fdr=max_individual_fdr, random_seed=random_seed,
+            labels_kept_fixed=labels_kept_fixed, sample_id=sample_id,
+            calculate_fdr=calculate_fdr,
+        )
 
 
 def mine(coords, labels, settings: Settings, sample_id: str = "") -> Result:

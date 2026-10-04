@@ -361,12 +361,18 @@ def test_empty_mining_result_has_empty_p_values_and_fdr():
 
 
 def test_runner_forwards_fdr_cutoff_and_preserves_raw_p_values(caplog):
-    from spatial_association_rules.runner import _run_one
+    from spatial_association_rules.runner import _run_one, _SampleTask
 
     coords, labels = grid_tissue()
     settings = base()
     expected = mine(coords, labels, settings).add_p_values(n_shuffles=1, random_seed=42)
-    result, failure = _run_one(("FOV1", coords, labels, settings, 1, 42, (), None, 0.05, 1.1))
+    result, failure = _run_one(_SampleTask(
+        sample_id="FOV1", coords=coords, labels=labels, settings=settings,
+        n_shuffles=1, seed=42, kept_fixed=(), min_lift_gain=None,
+        max_individual_fdr=0.05, min_consequent_conviction_gain=1.1,
+        n_conditional_shuffles=None, calculate_individual_fdr=True,
+        calculate_conditional_fdr=True,
+    ))
     assert failure is None
     assert not result.rules.empty
     np.testing.assert_allclose(result.rules.p_value, expected.p_value)

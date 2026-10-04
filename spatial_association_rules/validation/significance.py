@@ -61,12 +61,7 @@ def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labe
     #
     # The shuffle test permutes these rows to randomly reassign cell types.
     labels = np.asarray(labels, dtype=object)
-    names = sorted({str(label) for label in labels})
-    column_of = {name: i for i, name in enumerate(names)}
-
-    cell_labels = np.zeros((len(labels), len(names)), dtype=float)
-    for cell, label in enumerate(labels):
-        cell_labels[cell, column_of[str(label)]] = 1.0
+    cell_labels, item_index = _encode_labels(labels)
 
     # --- 2. MAP THE TISSUE ---
     # Build sparse adjacency maps. The physical tissue layout stays fixed
@@ -80,15 +75,7 @@ def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labe
     centers, neighbors, membership, patch_sizes = _adjacency(patches, len(labels))
 
 
-    # --- 3. PREPARE THE RULES ---
-
-    # Map human-readable cell names to matrix column indices.
-    item_index = {}
-    for name, column in column_of.items():
-        item_index[item_of(name, CENTER)] = column
-        item_index[item_of(name, NEIGHBOR)] = column + len(names)
-
-    # --- 4. LOCK FIXED CELLS ---
+    # --- 3. LOCK FIXED CELLS ---
 
     # Identify which cells can be randomly reassigned vs which must stay anchored.
     movable = np.arange(len(labels))[~_held_fixed(labels, labels_kept_fixed)]
@@ -101,7 +88,7 @@ def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labe
     logger.info(f"{prefix}Shuffling labels {n_shuffles} times against {len(rules)} rules...")
     started = time.time()
 
-    # --- 5. THE SHUFFLE TEST ---
+    # --- 4. THE SHUFFLE TEST ---
     # Randomize label assignments n times to see if rules survive by chance.
     #
     # How matrix multiplication (centers @ shuffled) instantly rebuilds the patches.
@@ -123,14 +110,7 @@ def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labe
         shuffled = cell_labels[order, :]
 
         # Multiply the fixed tissue maps by the randomized labels to rebuild patches.
-        transactions = np.hstack([
-            np.minimum(_dense(centers @ shuffled), 1.0),
-            np.minimum(_dense(neighbors @ shuffled), 1.0),
-        ])
-        
-        # Drop patches crowded by a single cell type, repeating the real run's procedure.
-        transactions = transactions[not_crowded(membership, patch_sizes, shuffled,
-                                                settings.max_one_type_share)]
+        transactions = _transactions(shuffled, (centers, neighbors, membership, patch_sizes), settings)
                                                 
         # Tally how many rules passed the statistical thresholds by pure chance.
         survived += survives_shuffle(layout, transactions, settings)
@@ -141,13 +121,37 @@ def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labe
     elapsed = time.time() - started
     logger.info(f"{prefix}Shuffling took {int(elapsed // 60)}m {elapsed % 60:.1f}s" if elapsed >= 60 else f"{prefix}Shuffling took {elapsed:.2f}s")
 
-    # --- 6. SCORE P-VALUES ---
+    # --- 5. SCORE P-VALUES ---
     # (times survived by luck + 1) / (total shuffles + 1)
     p_values = (survived + 1) / (n_shuffles + 1)
     
     # If a cell type was completely absent, its rule was never tested (p = 1.0).
     p_values[~layout.usable] = 1.0
     return p_values
+
+
+def _encode_labels(labels):
+    """Encode cell types once, using the same columns in both shuffle tests."""
+    names = sorted({str(label) for label in labels})
+    column_of = {name: i for i, name in enumerate(names)}
+    cell_labels = np.zeros((len(labels), len(names)), dtype=float)
+    for cell, label in enumerate(labels):
+        cell_labels[cell, column_of[str(label)]] = 1.0
+    item_index = {item_of(name, role): column + offset
+                  for name, column in column_of.items()
+                  for role, offset in ((CENTER, 0), (NEIGHBOR, len(names)))}
+    return cell_labels, item_index
+
+
+def _transactions(cell_labels, adjacency, settings):
+    """Rebuild weighted patches and reapply the crowding filter for this labeling."""
+    centers, neighbors, membership, patch_sizes = adjacency
+    transactions = np.hstack([
+        np.minimum(_dense(centers @ cell_labels), 1.0),
+        np.minimum(_dense(neighbors @ cell_labels), 1.0),
+    ])
+    return transactions[not_crowded(membership, patch_sizes, cell_labels,
+                                    settings.max_one_type_share)]
 
 
 def _adjacency(patches, n_cells):

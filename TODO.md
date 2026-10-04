@@ -54,6 +54,7 @@ Order matters: section 1 first, then 2, then the rest.
 ## 6. For a statistician, not for code
 
 - Check BH's dependence assumptions for overlapping rules; the correction now counts the complete candidate family
+- Validate conditional FDR on simulated tissues: preserve simpler associations, add no complex-rule effect, rerun the full pipeline, and check false discoveries at the chosen cutoff.
 - The test assumes any cell label could sit anywhere in the tissue
 - Whether the shuffling should be held within regions or cell groups instead
 

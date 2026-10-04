@@ -148,3 +148,21 @@ def test_invalid_fdr_cutoff_is_rejected_before_shuffling(cutoff):
     result = Result(pd.DataFrame(), {}, [], np.array([]), None)
     with pytest.raises(ValueError, match="max_individual_fdr"):
         result.add_p_values(100, max_individual_fdr=cutoff)
+
+
+def test_raw_p_values_can_be_requested_without_fdr(monkeypatch):
+    settings = Settings(weighting=Weighting.BINARY, method=Method.CN, radius=1,
+                        min_support=0.1, min_lift=1.2, max_items_per_rule=3,
+                        include_avoidance_rules=False)
+    rules = pd.DataFrame([(("A_CENTER",), ("B_NEIGHBOR",), "attracts")],
+                         columns=["antecedents", "consequents", "kind"])
+    result = Result(rules, {}, [], np.array(["A", "B"]), settings)
+    module = import_module("spatial_association_rules.mine")
+    monkeypatch.setattr(module, "p_values_for", lambda *args: np.array([0.2]))
+    monkeypatch.setattr(module, "fdr_families", lambda *args, **kwargs: pytest.fail("FDR ran"))
+
+    tested = result.add_p_values(9, calculate_fdr=False)
+    assert tested.p_value.tolist() == [0.2]
+    assert "individual_fdr" not in tested
+    with pytest.raises(ValueError, match="max_individual_fdr requires calculate_fdr"):
+        result.add_p_values(9, max_individual_fdr=0.05, calculate_fdr=False)

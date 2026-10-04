@@ -72,7 +72,8 @@ filtering.
 ## Testing many rules at once
 
 Searching many rules makes chance findings more likely. `add_p_values()` returns
-the raw `p_value` and a corrected value, `individual_fdr`. The correction uses
+the raw `p_value` and, by default, a corrected value, `individual_fdr`. Set
+`calculate_fdr=False` to request raw p-values alone. The correction uses
 [Benjamini-Hochberg (BH)](https://doi.org/10.1111/j.2517-6161.1995.tb02031.x),
 separately for each sample and rule size. Size counts items on both sides of a
 rule. Attraction and avoidance rules of the same size are corrected together.
@@ -226,7 +227,8 @@ section 3, uses binary transaction counts. The 2019 tutorial, section 4.2, descr
 comparisons against all proper antecedent subsets, without requiring their individual
 significance first. Our classifier does not implement that test: weighted supports
 are fractional and spatial patches overlap. The current individual-rule shuffle
-also does not test conditional improvement. No improvement p-values are reported.
+also does not test conditional improvement. The optional conditional shuffle below
+uses a different null and does not change this classifier.
 
 References:
 
@@ -234,3 +236,111 @@ References:
   section 3. [Local paper](references/fdr%20papers/Discovering%20Significant%20Rules%20Webb.pdf).
 - Wilhelmiina Hämäläinen and Geoffrey I. Webb (2019), *A Tutorial on Statistically
   Sound Pattern Discovery*, section 4.2. [Published paper](https://doi.org/10.1007/s10618-018-0590-x).
+
+## Conditional shuffle tests
+
+`Result.add_conditional_p_values` is an optional second step after `add_p_values`.
+It preserves the original p-values and FDR, and does not change classification.
+`run_samples(n_conditional_shuffles=...)` runs it before classification.
+
+### Comparisons and fixed cells
+
+Use the same simpler-rule matching as the classifier, across both kinds. Only rows
+with `individual_fdr <= max_individual_fdr` qualify as simpler rules. Their previous
+classification is irrelevant. Pairwise and mixed rules are not targets.
+
+For `A + B -> C` compared with `A -> C`, freeze every physical A and C cell in the
+sample, wherever it is. Merge these with the configured fixed cells. Shuffle the
+remaining labels among the remaining cell positions, preserving their counts.
+If `B -> C` also qualifies, run a separate comparison with B and C fixed. Do not
+freeze the union of both parents in one test: that would immobilize the full rule.
+Automatic parent type names are exact; only user-supplied patterns interpret `*`.
+
+The null is that all assignments of the remaining labels to the remaining positions
+are equally likely, conditional on the fixed type locations and label counts. This
+preserves the fixed types' geometry but can destroy clustering of other types and
+their relationships with the fixed types. It is not Webb's conditional independence
+null. Overlapping patches use the same shuffled physical cells; weighted supports
+are recomputed directly, without rounding them into Fisher counts.
+
+### Statistic and missing cases
+
+For each comparison, let `complex` and `simpler` be their lift values for a complex
+antecedent, or conviction values for a complex consequent. The gain statistic is:
+
+- complex attraction: `complex / simpler`;
+- complex avoidance: `simpler / complex`.
+
+Equal zeros and equal infinities count as a ratio of 1. A finite positive number
+divided by zero is infinite; a finite number divided by infinity is zero. A missing
+side makes the metric undefined. A universal consequent makes conviction undefined.
+Observed undefined metrics leave that comparison untestable. Observed gains no
+greater than 1 get p = 1 without shuffling. The classification's minimum gain remains
+a separate effect requirement; it is not the permutation reference value.
+
+Rebuild transactions and reapply the crowding filter for the observed data and every
+shuffle. This can change which patches survive, even when parent-type cells stay
+fixed, so measure both the complex and simpler rule again. The comparison uses the
+same procedure throughout. An undefined shuffled gain counts as no improvement
+(score 0); no permutation is discarded or removed from the denominator.
+
+Count gains at least as large as the observed gain, including ties (relative tolerance
+1e-12 for floating-point arithmetic). The comparison p-value is `(count + 1)/(B + 1)`.
+An infinite observed gain is matched only by infinite shuffled gains.
+
+If a comparison has all relevant cell types fixed, missing cell types, or fewer than
+two distinct movable labels, it is untestable. Repeated types can cause this: freezing
+Paneth and Epithelial also freezes every type in
+`Paneth_CENTER + Paneth_NEIGHBOR -> Epithelial_NEIGHBOR`.
+
+### Combining and interpreting results
+
+`conditional_tests` stores the parent, metric, observed gain, fixed types, status, and p-value for
+every comparison. `conditional_p_value` is their maximum. Thus every required
+comparison must have a small p-value. If any is untestable, retain the individual
+results but leave the combined value missing. No qualifying parent also means missing.
+
+For a fixed collection of valid component tests, this maximum is the
+[intersection-union test](https://pmc.ncbi.nlm.nih.gov/articles/PMC2752611/);
+independence between comparisons is not required. It does not provide correction
+across different complex rules.
+
+By default, `conditional_fdr` applies Benjamini–Hochberg to the combined p-values, separately
+for each sample and rule size. Attraction and avoidance, complex antecedents and
+complex consequents share one group. Each rule contributes one p-value, regardless
+of its number of comparisons or fixed-type sets. The candidate count is the same
+as for `individual_fdr`, including allowed mixed candidates when enabled. Unreturned
+or untested candidates count as p=1 for correction; missing conditional p-values
+and their adjusted values stay missing in the output. No extra shuffles are needed.
+Set `calculate_fdr=False` for the conditional test to skip this correction while
+keeping the comparison p-values. The parent selection still requires the original
+`individual_fdr` column and a cutoff.
+
+The parent cutoff `max_individual_fdr` selects simpler rules and is reused for the
+resolution check that `individual_fdr` runs. If too few shuffles are planned for any
+rule of a size to reach it, a warning is logged and that size's `conditional_fdr` is
+missing. So is a size with more rules than candidates, which means repeated rows or
+rows from another sample. Original statistics and classification are unchanged;
+`individual_fdr` still applies only to the original `p_value`.
+
+Here the rules and qualifying parents were selected using the same data. This
+selection and dependence between rules still need validation before claiming FDR
+control for the full procedure. BH adjustment alone does not establish that control.
+
+The tests check permutation arithmetic and conservative rejection rates over a small,
+fully enumerated null with prespecified comparisons. This does not validate FDR after
+mining and parent selection, or the random-label null as a biological model.
+
+### Work and reproducibility
+
+`Result.conditional_test_plan` lists comparisons without building shuffled tissues.
+Its `attrs["shuffle_batches"]` counts distinct usable fixed-type sets: an upper bound
+because observed non-improvements and undefined metrics can remove work later.
+Each batch shares rebuilt tissues among all its comparisons. Geometry is built once,
+and supports are measured only for the rules used by that batch. The actual counts
+are recorded in `rules.attrs["conditional_test_summary"]` and logged.
+
+Seeds depend on the base seed and the fixed-type set, so reordering rows does not
+change results. In `run_samples`, the base seed is already specific to the sample.
+`add_p_values` records `labels_kept_fixed` in the returned frame's metadata. Conditional
+testing inherits that configuration and adds any extra fixed-label patterns.

@@ -38,18 +38,13 @@ def classify_complex_rules(rules, min_lift_gain=DEFAULT_IMPROVEMENT_GAIN, max_in
     antecedents = list(result["antecedents"])
     consequents = list(result["consequents"])
     kinds = list(result["kind"])
-    ant_types = [_types(items) for items in antecedents]
-    con_types = [_types(items) for items in consequents]
     rule_types = [_rule_type(len(a), len(c)) for a, c in zip(antecedents, consequents)]
 
     eligible = [True] * len(result)
     if max_individual_fdr is not None and "individual_fdr" in result:
         eligible = result["individual_fdr"].le(max_individual_fdr).fillna(False).tolist()
 
-    by_signature = defaultdict(list)
-    for pos, signature in enumerate(zip(ant_types, con_types)):
-        by_signature[signature].append(pos)
-
+    parents = simpler_positions(result)
     classes, information, simpler_rules = [], [], []
     for pos, rule_type in enumerate(rule_types):
         if rule_type in ("pairwise", "complex-mixed"):
@@ -58,8 +53,7 @@ def classify_complex_rules(rules, min_lift_gain=DEFAULT_IMPROVEMENT_GAIN, max_in
             simpler_rules.append([])
             continue
 
-        shorter = sorted(p for signature in _shorter(ant_types[pos], con_types[pos])
-                         for p in by_signature.get(signature, []))
+        shorter = parents[pos]
         significant = [p for p in shorter if eligible[p]]
         simpler_rules.append([_name(antecedents[p], consequents[p]) for p in shorter])
 
@@ -90,6 +84,23 @@ def _gain(value, name):
     if not isfinite(value) or value < 1:
         raise ValueError(f"{name} must be a finite ratio >= 1, or None or 0")
     return value
+
+
+def simpler_positions(rules):
+    """All matching shorter row positions, of either kind; skip pairwise and mixed."""
+    signatures = [(_types(a), _types(c))
+                  for a, c in zip(rules["antecedents"], rules["consequents"])]
+    by_signature = defaultdict(list)
+    for pos, signature in enumerate(signatures):
+        by_signature[signature].append(pos)
+    parents = []
+    for ants, cons in signatures:
+        if _rule_type(len(ants), len(cons)) in ("pairwise", "complex-mixed"):
+            parents.append([])
+        else:
+            parents.append(sorted(p for shorter in _shorter(ants, cons)
+                                  for p in by_signature.get(shorter, [])))
+    return parents
 
 
 def _beats(value, simpler, gain, kind):

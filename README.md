@@ -62,7 +62,7 @@ rules  = classify_rules(tested, max_individual_fdr=0.05)
 print(rules[["antecedents", "consequents", "kind", "lift", "p_value"]])
 ```
 
-Three calls, in that order: mine, test, filter. You can stop after any of them.
+Three calls, in that order: mine, test, classify. You can stop after any of them.
 
 Each cell type is found sitting with itself, and the two clumped types are found keeping
 apart:
@@ -104,6 +104,7 @@ Results come back as DataFrames.
 
 One row per rule. `mine` gives the first block, `add_p_values` the second,
 `classify_rules` the third, and `run_samples` adds `sample_id`.
+The optional conditional test adds the last four columns below.
 
 | column | what it is |
 |---|---|
@@ -114,12 +115,16 @@ One row per rule. `mine` gives the first block, `add_p_values` the second,
 | `confidence`, `lift`, `leverage`, `conviction` | how strong it is. `lift > 1` attracts, `< 1` avoids |
 | `len_ant`, `len_con` | items on each side |
 | `p_value` | raw p-value from the shuffle test |
-| `individual_fdr` | p-value corrected for testing many rules, grouped by sample and rule size; `NaN` (missing) when too few shuffles can meet the chosen cutoff |
+| `individual_fdr` | optional corrected p-value, grouped by sample and rule size; `NaN` when too few shuffles can meet the chosen cutoff |
 | `rule_type` | `pairwise`, `complex-antecedents`, `complex-consequents`, `complex-mixed` |
 | `complex_class` | why the rule was kept or dismissed ([how](DESIGN.md#complex-rules-classification)) |
 | `adds_information` | whether the rule passes the simpler-rule comparison; missing for unclassified mixed rules |
 | `simpler_rules` | what it was weighed against |
 | `sample_id` | which sample, from `run_samples` only |
+| `conditional_p_value` | largest p-value across the conditional comparisons; missing if any required comparison is untestable |
+| `conditional_fdr` | optional corrected conditional p-value within this sample and rule size; missing when the conditional p-value is missing or too few shuffles can meet `max_individual_fdr` |
+| `conditional_status` | `tested`, `no_significant_simpler`, `not_applicable`, or `untestable` |
+| `conditional_tests` | each simpler rule, fixed types, metric, observed gain, status, and raw conditional p-value |
 
 ## Pipeline
 
@@ -172,7 +177,8 @@ threshold set to `None` is not applied.
 | `n_shuffles` | **required.** The smallest possible p-value is `1/(n_shuffles+1)`, so 5 shuffles can never reach 0.05 |
 | `random_seed` | fix it and re-runs give identical p-values |
 | `labels_kept_fixed` | labels that never move. `"Name"` is exact; `"Name*"` matches anything starting with Name, so `"CD4*"` also catches `CD45` |
-| `max_individual_fdr` | chosen cutoff, greater than 0 and at most 1. Checks whether enough shuffles are planned. Use the same cutoff in `classify_rules`. Default `None` skips this check but still calculates corrected p-values |
+| `calculate_fdr` | default `True`. Set `False` to return raw `p_value` only, without an `individual_fdr` column |
+| `max_individual_fdr` | chosen cutoff, greater than 0 and at most 1. Checks whether enough shuffles are planned. Use the same cutoff in `classify_rules`. Default `None` skips this check; `calculate_fdr` controls correction |
 
 Testing many rules increases the risk of chance findings. The correction accounts
 for all allowed rules, including those the search dropped. It groups rules by
@@ -185,7 +191,62 @@ possible result cannot meet the cutoff. Those rule sizes still get raw p-values,
 but their `individual_fdr` is `NaN` (missing). More shuffles are needed to have any
 chance of passing. See [DESIGN](DESIGN.md#testing-many-rules-at-once) for details.
 
+For raw p-values alone, call `result.add_p_values(n_shuffles=1000,
+calculate_fdr=False)`. Use `classify_rules(tested)` for effect-only classification.
+Conditional testing requires `individual_fdr`, so it cannot follow this raw-only call.
+
 If `labels_kept_fixed` leaves too few cells free to shuffle, testing raises an error.
+
+### Optional conditional tests
+
+Keep each significant simpler rule's cell types fixed and shuffle the remaining labels.
+This asks whether the observed lift or conviction gain is unusual under that restricted
+shuffle. It freezes **all cells** of those types, including cells outside joint patches,
+plus the fixed labels recorded by `add_p_values`.
+
+```python
+plan = result.conditional_test_plan(tested, max_individual_fdr=0.05)
+print(plan[["rule", "simpler_rule", "fixed_types", "status"]])
+print(plan.attrs["shuffle_batches"])  # upper bound on separate shuffle batches
+
+conditional = result.add_conditional_p_values(
+    tested, n_shuffles=1000, random_seed=42, max_individual_fdr=0.05,
+)
+rules = classify_rules(conditional, max_individual_fdr=0.05)
+```
+
+Rules sharing the same fixed types share a batch. With 20 batches and 1,000 shuffles,
+plan for up to 20,000 extra tissue rebuilds. The plan itself runs no shuffles.
+
+For each comparison, the test uses lift gain for complex antecedents and conviction
+gain for complex consequents, in the complex rule's direction. It counts shuffled
+gains at least as large as the observed gain. The p-value is `(count + 1) / (shuffles + 1)`.
+The combined value is the **largest** comparison p-value. A rule with no observed
+improvement gets 1 for that comparison.
+
+Set `calculate_fdr=False` in `add_conditional_p_values` to keep the comparison and
+combined p-values without calculating or returning `conditional_fdr`.
+
+Pairwise and mixed rules are not tested. No significant simpler rule, undefined
+metrics, all relevant types fixed, or no remaining labels that can change means a
+missing conditional p-value. `conditional_tests` gives the reason. Partial results
+are retained, but an untestable comparison leaves the combined value missing.
+
+`conditional_fdr` applies Benjamini–Hochberg to one combined p-value per rule,
+separately for each sample and rule size. Both kinds and both complex types share
+the correction. It counts all allowed candidates, as `individual_fdr` does; untested
+candidates count as p=1 for correction but keep missing output values.
+
+Selecting simpler rules from the same data still needs validation before claiming
+FDR control for the full procedure. Adjusting the p-values does not resolve this.
+The original `p_value`, `individual_fdr`, and classification keep their meanings.
+This is a restricted shuffle test, not Webb's test. [Details](DESIGN.md#conditional-shuffle-tests).
+
+Both methods require `individual_fdr` and a cutoff (default `0.05`). Pass the complete
+frame returned by `add_p_values`; only simpler rules present in that frame can be
+compared. `labels_kept_fixed` can add fixed types. The original fixed-label settings
+are stored in the frame's `attrs`; if you reload a frame without that metadata, pass
+those settings again. `n_shuffles` must be positive.
 
 ### classify_rules
 
@@ -235,8 +296,9 @@ With an FDR cutoff set, missing corrected values cannot qualify a simpler rule.
 If the whole `individual_fdr` column is absent, comparison uses effects alone, as it
 does with no cutoff. A complex rule's own FDR does not decide its class: check it
 separately. `adds_information=True` means the rule survives this comparison, not that
-its additional value is statistically established. There is no improvement significance
-test. See [DESIGN](DESIGN.md#complex-rules-classification) for matching and references.
+its additional value is statistically established. Classification does not use
+conditional p-values. See [DESIGN](DESIGN.md#complex-rules-classification) for matching
+and references.
 
 ### run_samples
 
@@ -245,9 +307,12 @@ test. See [DESIGN](DESIGN.md#complex-rules-classification) for matching and refe
 | `samples` | iterable of `(sample_id, coords, labels)`. Not a DataFrame, so no column names are assumed |
 | `workers` | `None` runs here. An integer runs that many **processes** — mining is CPU-bound. On Windows, guard the caller with `if __name__ == "__main__"` |
 | `output_path` | where to write `run_config.json`. `None` writes nothing |
+| `n_conditional_shuffles` | optional extra conditional testing before classification; default `None` disables it. Requires `max_individual_fdr` |
+| `calculate_individual_fdr` | default `True`; `False` returns raw p-values without individual correction. Requires `max_individual_fdr=None` and disables conditional testing |
+| `calculate_conditional_fdr` | default `True`; `False` keeps conditional p-values without conditional correction when conditional testing is enabled |
 | `min_lift_gain` | lift gain for complex antecedents, as in `classify_rules` |
 | `min_consequent_conviction_gain` | conviction gain for complex consequents, as in `classify_rules`; default `1.1` |
-| `max_individual_fdr` | same cutoff for checking the shuffle count and deciding whether shorter rules can dismiss longer ones. `None` skips both checks but still calculates corrected p-values |
+| `max_individual_fdr` | cutoff for significant simpler rules and the shuffle-count check. `None` skips both; FDR is still calculated when requested |
 
 Each sample derives its own seed from `random_seed`, so a parallel run matches a serial
 one.
