@@ -11,6 +11,24 @@ from spatial_association_rules import Method, Settings, Weighting
 from spatial_association_rules import runner
 
 
+def test_runner_exposes_raw_rules(monkeypatch):
+    rules = pd.DataFrame([{"antecedents": ("A_CENTER",),
+                           "consequents": ("B_NEIGHBOR",), "kind": "attracts",
+                           "lift": 2.0}])
+    raw_rules = rules.copy()
+    result = SimpleNamespace(rules=rules, raw_rules=raw_rules,
+                             stats={"patches_kept": 1}, add_p_values=lambda **kwargs: rules)
+    monkeypatch.setattr(runner, "mine", lambda *args, **kwargs: result)
+    settings = Settings(weighting=Weighting.BINARY, method=Method.CN, radius=1,
+                        min_support=0.1, min_lift=1.2, max_items_per_rule=2,
+                        include_avoidance_rules=False)
+    samples = [("sample", [], [])]
+    report = runner.run_samples(samples, settings, n_shuffles=0,
+                                calculate_individual_fdr=False)
+    assert report.raw_rules().sample_id.tolist() == ["sample"]
+    assert report.raw_rules().lift.tolist() == [2.0]
+
+
 @pytest.mark.parametrize("gain,expected", [
     ("default", True), (None, True), (0, True), (1.1, True), (1.5, False),
 ])
@@ -24,7 +42,7 @@ def test_runner_uses_and_records_consequent_gain(monkeypatch, tmp_path, gain, ex
     ], columns=["antecedents", "consequents", "conviction"])
     rules["kind"] = "attracts"
     rules["lift"] = [2.0, 2.0, 2.0, 2.1, 2.0]
-    result = SimpleNamespace(rules=rules, stats={"patches_kept": 100},
+    result = SimpleNamespace(rules=rules, raw_rules=pd.DataFrame(), stats={"patches_kept": 100},
                              add_p_values=lambda **kwargs: rules)
     monkeypatch.setattr(runner, "mine", lambda *args, **kwargs: result)
     settings = Settings(weighting=Weighting.BINARY, method=Method.CN, radius=1,
@@ -54,10 +72,11 @@ def test_runner_can_add_conditional_tests_and_records_the_budget(monkeypatch, tm
     def conditional(tested, **options):
         seen.update(options)
         assert tested is rules
-        return tested.assign(conditional_p_value=[float("nan"), 0.02],
-                             conditional_fdr=[float("nan"), 0.12])
+        return (tested.assign(conditional_p_value=[float("nan"), 0.02],
+                              conditional_fdr=[float("nan"), 0.12]),
+                pd.DataFrame([{"rule_idx": 1, "simpler_idx": 0, "p_value": 0.02}]))
 
-    result = SimpleNamespace(rules=rules, stats={"patches_kept": 100},
+    result = SimpleNamespace(rules=rules, raw_rules=pd.DataFrame(), stats={"patches_kept": 100},
                              add_p_values=lambda **kwargs: rules,
                              add_conditional_p_values=conditional)
     monkeypatch.setattr(runner, "mine", lambda *args, **kwargs: result)
@@ -70,6 +89,13 @@ def test_runner_can_add_conditional_tests_and_records_the_budget(monkeypatch, tm
                                 output_path=tmp_path)
     assert report.rules().conditional_p_value.iloc[1] == 0.02
     assert report.rules().conditional_fdr.iloc[1] == 0.12
+    assert "conditional_tests" not in report.rules()
+    assert report.results[0].comparisons.to_dict("records") == [
+        {"rule_idx": 1, "simpler_idx": 0, "p_value": 0.02}
+    ]
+    assert report.comparisons().to_dict("records") == [
+        {"rule_idx": 1, "simpler_idx": 0, "p_value": 0.02, "sample_id": "sample"}
+    ]
     assert report.rules().complex_class.iloc[1] == "stronger_than_simpler"
     assert seen == dict(n_shuffles=29, random_seed=runner.seed_for(7, "sample"),
                         max_individual_fdr=0.05, labels_kept_fixed=("D",), sample_id="sample",
@@ -100,9 +126,10 @@ def test_runner_passes_independent_fdr_choices(monkeypatch, tmp_path):
 
     def conditional(tested, **options):
         seen["conditional"] = options["calculate_fdr"]
-        return tested.assign(conditional_p_value=[float("nan"), 0.2])
+        return (tested.assign(conditional_p_value=[float("nan"), 0.2]),
+                pd.DataFrame([{"rule_idx": 1, "simpler_idx": 0, "p_value": 0.2}]))
 
-    result = SimpleNamespace(rules=rules, stats={"patches_kept": 1},
+    result = SimpleNamespace(rules=rules, raw_rules=pd.DataFrame(), stats={"patches_kept": 1},
                              add_p_values=original, add_conditional_p_values=conditional)
     monkeypatch.setattr(runner, "mine", lambda *args, **kwargs: result)
     settings = Settings(weighting=Weighting.BINARY, method=Method.CN, radius=1,
@@ -135,7 +162,8 @@ def test_runner_can_return_raw_p_values_without_fdr(monkeypatch):
         assert options["calculate_fdr"] is False
         return rules.assign(p_value=0.2)
 
-    result = SimpleNamespace(rules=rules, stats={"patches_kept": 1}, add_p_values=original)
+    result = SimpleNamespace(rules=rules, raw_rules=pd.DataFrame(),
+                             stats={"patches_kept": 1}, add_p_values=original)
     monkeypatch.setattr(runner, "mine", lambda *args, **kwargs: result)
     settings = Settings(weighting=Weighting.BINARY, method=Method.CN, radius=1,
                         min_support=0.1, min_lift=1.2, max_items_per_rule=3,
@@ -146,3 +174,4 @@ def test_runner_can_return_raw_p_values_without_fdr(monkeypatch):
     assert output.p_value.tolist() == [0.2]
     assert "individual_fdr" not in output
     assert output.adds_information.tolist() == [True]
+    assert report.results[0].comparisons.empty

@@ -58,6 +58,11 @@ def binary(*items):
     return {item: 1.0 for item in items}
 
 
+def filtered_rules(transactions, settings):
+    rules, _raw_rules = mine_rules(transactions, settings)
+    return rules
+
+
 def base(**changes):
     """
     Settings for the tests, stated in full here on purpose.
@@ -98,6 +103,31 @@ FIVE = [
     binary("D_CENTER", "B_NEIGHBOR"),
     binary("D_CENTER", "C_NEIGHBOR"),
 ]
+
+
+def test_raw_rules_include_rules_before_final_filters():
+    settings = base(min_lift=1.1, include_avoidance_rules=False)
+    rules, raw_rules = mine_rules(FIVE, settings)
+
+    by_sides = {(row.antecedents, row.consequents): row
+                for row in raw_rules.itertuples()}
+    assert by_sides[(('A_CENTER',), ('B_NEIGHBOR',))].lift >= 1.1
+    assert by_sides[(('A_CENTER',), ('C_NEIGHBOR',))].lift < 1.1
+    assert len(raw_rules) > len(rules)
+
+    _, both_raw = mine_rules(FIVE, base(min_lift=1.1))
+    assert "avoids" in both_raw.kind.to_numpy()
+
+    coords, labels = grid_tissue(side=6)
+    normal = mine(coords, labels, base())
+    assert not normal.raw_rules.empty
+    assert set(normal.rules.columns) == set(normal.raw_rules.columns) | {"rule_idx"}
+    assert normal.rules.rule_idx.tolist() == list(range(len(normal.rules)))
+
+    rare = base(min_label_count=len(labels) + 1, include_avoidance_rules=False)
+    result = mine(coords, labels, rare)
+    assert not result.raw_rules.empty
+    assert result.rules.empty
 
 
 def test_binary_support_is_plain_counting():
@@ -181,7 +211,7 @@ def test_packed_support_answers_exactly_what_the_float_path_answers():
 
 
 def test_binary_rule_metrics_are_hand_checkable():
-    rules = mine_rules(FIVE, base(weighting=Weighting.BINARY, min_support=0.1, min_patches=0))
+    rules = filtered_rules(FIVE, base(weighting=Weighting.BINARY, min_support=0.1, min_patches=0))
     rule = rules[(rules["antecedents"] == ("A_CENTER",))
                  & (rules["consequents"] == ("B_NEIGHBOR",))].iloc[0]
 
@@ -385,9 +415,9 @@ def test_resolution_check_includes_rules_from_relaxed_high_confidence_support(mo
                     + [binary("C_CENTER", "D_NEIGHBOR")] * 18)
     settings = base(weighting=Weighting.BINARY, min_support=0.2, min_lift=1.2,
                     include_avoidance_rules=False)
-    assert mine_rules(transactions, settings).empty
+    assert filtered_rules(transactions, settings).empty
     settings = settings.replace(strong_confidence=0.9, min_support_when_strong=0.05)
-    mined = mine_rules(transactions, settings)
+    mined = filtered_rules(transactions, settings)
     assert len(mined) == 1
     assert mined.iloc[0].support == pytest.approx(0.1)
     result = Result(mined, {}, [], np.array(["A", "B", "C", "D"]), settings)
@@ -485,7 +515,7 @@ def rule_named(rules, antecedents, consequents):
 
 def test_a_pair_that_never_co_occurs_is_found():
     """Joint support of zero is the finding, not a reason to prune it away."""
-    rules = mine_rules(apart(), base(min_support=0.1))
+    rules = filtered_rules(apart(), base(min_support=0.1))
 
     rule = rule_named(rules, ("A_CENTER",), ("D_NEIGHBOR",))
     assert rule["kind"] == "avoids"
@@ -498,7 +528,7 @@ def test_a_pair_that_never_co_occurs_survives_no_shuffle():
     """The null must judge it as avoidance too, or its p-value is about another rule."""
     transactions = apart()
     settings = base(min_support=0.1)
-    rules = mine_rules(transactions, settings)
+    rules = filtered_rules(transactions, settings)
 
     matrix, item_index = weight_matrix(transactions)
     layout = _rule_columns(rules, item_index)
@@ -517,12 +547,12 @@ def test_a_meeting_nobody_expected_is_not_a_finding():
     transactions = [binary("A_CENTER", "B_NEIGHBOR")] * 96 + [binary("C_CENTER", "D_NEIGHBOR")] * 4
     settings = base(min_support=0.02)
 
-    strict = mine_rules(transactions, settings.replace(avoidance_min_expected_meetings=10))
+    strict = filtered_rules(transactions, settings.replace(avoidance_min_expected_meetings=10))
     avoiding = strict[strict["kind"] == "avoids"]
     assert not ((avoiding["antecedents"] == ("A_CENTER",))
                 & (avoiding["consequents"] == ("D_NEIGHBOR",))).any()
 
-    lenient = mine_rules(transactions, settings.replace(avoidance_min_expected_meetings=2))
+    lenient = filtered_rules(transactions, settings.replace(avoidance_min_expected_meetings=2))
     assert rule_named(lenient, ("A_CENTER",), ("D_NEIGHBOR",))["kind"] == "avoids"
 
 
@@ -536,10 +566,10 @@ def test_a_rate_measured_on_too_few_patches_is_not_a_finding():
     transactions = [binary("A_CENTER", "B_NEIGHBOR")] * 94 + [binary("C_CENTER", "D_NEIGHBOR")] * 6
     settings = base(min_support=0.02, avoidance_min_expected_meetings=5)
 
-    assert rule_named(mine_rules(transactions, settings.replace(min_patches=5)),
+    assert rule_named(filtered_rules(transactions, settings.replace(min_patches=5)),
                       ("C_CENTER",), ("B_NEIGHBOR",))["kind"] == "avoids"
 
-    strict = mine_rules(transactions, settings.replace(min_patches=10))
+    strict = filtered_rules(transactions, settings.replace(min_patches=10))
     assert not ((strict["antecedents"] == ("C_CENTER",)).any())
 
 
@@ -555,7 +585,7 @@ def test_a_rare_cell_type_can_still_be_the_centre():
                     + [binary("D_CENTER", "B_NEIGHBOR")] * 900)
     settings = base(min_support=0.01, min_patches=10, avoidance_min_expected_meetings=10)
 
-    rule = rule_named(mine_rules(transactions, settings), ("A_CENTER",), ("B_NEIGHBOR",))
+    rule = rule_named(filtered_rules(transactions, settings), ("A_CENTER",), ("B_NEIGHBOR",))
     assert rule["kind"] == "avoids"
     assert rule["antecedent support"] == pytest.approx(20 / 920)   # about 2%
     assert rule["support"] == 0.0
@@ -569,15 +599,15 @@ def test_the_avoidance_thresholds_remove_rules():
     settings = base(min_support=0.05, avoidance_min_expected_meetings=5)
 
     # A_CENTER -> B_NEIGHBOR: support 0.4, expected 0.5 * 0.9 = 0.45, so lift is 0.888.
-    loose = mine_rules(transactions, settings.replace(avoidance_max_lift=0.9))
+    loose = filtered_rules(transactions, settings.replace(avoidance_max_lift=0.9))
     assert rule_named(loose, ("A_CENTER",), ("B_NEIGHBOR",))["lift"] == pytest.approx(0.4 / 0.45)
 
-    tighter = mine_rules(transactions, settings.replace(avoidance_max_lift=0.8))
+    tighter = filtered_rules(transactions, settings.replace(avoidance_max_lift=0.8))
     assert not ((tighter["antecedents"] == ("A_CENTER",))
                 & (tighter["consequents"] == ("B_NEIGHBOR",))).any()
 
     # leverage here is 0.4 - 0.45 = -0.05, so a bar below that removes it too.
-    by_leverage = mine_rules(transactions, settings.replace(avoidance_max_lift=0.9,
+    by_leverage = filtered_rules(transactions, settings.replace(avoidance_max_lift=0.9,
                                                             avoidance_max_leverage=-0.1))
     assert not ((by_leverage["antecedents"] == ("A_CENTER",))
                 & (by_leverage["consequents"] == ("B_NEIGHBOR",))).any()
@@ -588,7 +618,7 @@ def test_a_cell_type_can_avoid_itself():
     transactions = ([binary("A_CENTER", "B_NEIGHBOR")] * 45
                     + [binary("B_CENTER", "A_NEIGHBOR")] * 45
                     + [binary("A_CENTER", "A_NEIGHBOR")] * 10)
-    rules = mine_rules(transactions, base(min_support=0.05, avoidance_min_expected_meetings=5))
+    rules = filtered_rules(transactions, base(min_support=0.05, avoidance_min_expected_meetings=5))
 
     rule = rule_named(rules, ("A_CENTER",), ("A_NEIGHBOR",))
     assert rule["kind"] == "avoids"
@@ -608,7 +638,7 @@ def test_avoidance_finds_rules_longer_than_a_pair():
                     + [binary("A_CENTER", "C_NEIGHBOR")] * 20
                     + [binary("D_CENTER", "C_NEIGHBOR")] * 18
                     + [binary("D_CENTER", "B_NEIGHBOR")] * 32)
-    rules = mine_rules(transactions, base(min_support=0.02, max_items_per_rule=3,
+    rules = filtered_rules(transactions, base(min_support=0.02, max_items_per_rule=3,
                                           avoidance_min_expected_meetings=5))
 
     rule = rule_named(rules, ("A_CENTER", "B_NEIGHBOR"), ("C_NEIGHBOR",))
@@ -631,7 +661,7 @@ def test_avoidance_reads_the_weights_when_they_are_not_all_one():
     transactions = ([{"A_CENTER": 1.0, "B_NEIGHBOR": 0.25}] * 40
                     + [{"A_CENTER": 1.0, "C_NEIGHBOR": 1.0}] * 10
                     + [{"D_CENTER": 1.0, "B_NEIGHBOR": 1.0}] * 50)
-    rules = mine_rules(transactions, base(min_support=0.05,
+    rules = filtered_rules(transactions, base(min_support=0.05,
                                           avoidance_min_expected_meetings=5))
 
     #  A_CENTER 0.50,  B_NEIGHBOR (40 * 0.25 + 50) / 100 = 0.60,  joint 40 * 0.25 / 100 = 0.10
@@ -746,7 +776,7 @@ def test_the_prefilter_cannot_change_which_rules_come_out():
     settings = base(min_support=0.05, max_items_per_rule=3,
                     min_patches=10, avoidance_min_expected_meetings=5)
 
-    mined = mine_rules(transactions, settings)
+    mined = filtered_rules(transactions, settings)
     mined = mined[mined["kind"] == "avoids"]
     searched = {(row.antecedents, row.consequents) for row in mined.itertuples()}
 
@@ -773,7 +803,7 @@ def test_the_two_kinds_never_describe_the_same_rule():
 
 
 def test_avoidance_can_be_turned_off():
-    rules = mine_rules(apart(), base(min_support=0.1, include_avoidance_rules=False))
+    rules = filtered_rules(apart(), base(min_support=0.1, include_avoidance_rules=False))
     assert rules.empty or (rules["kind"] == "attracts").all()
 
 
@@ -812,8 +842,8 @@ def test_binary_and_weighted_agree_when_every_weight_is_one():
     transactions = repeating_transactions(210)
     settings = base(min_support=0.02)
 
-    as_binary = mine_rules(transactions, settings.replace(weighting=Weighting.BINARY))
-    as_weighted = mine_rules(transactions, settings.replace(weighting=Weighting.WEIGHTED))
+    as_binary = filtered_rules(transactions, settings.replace(weighting=Weighting.BINARY))
+    as_weighted = filtered_rules(transactions, settings.replace(weighting=Weighting.WEIGHTED))
 
     assert not as_binary.empty
     pd.testing.assert_frame_equal(as_binary, as_weighted)
@@ -949,8 +979,8 @@ def test_one_sided_complex_rules_limits_both_searches(weighting):
                          for item in row} for row in transactions]
     settings = base(weighting=weighting, max_items_per_rule=5)
     assert settings.one_sided_complex_rules is True
-    restricted = mine_rules(transactions, settings)
-    unrestricted = mine_rules(transactions, settings.replace(one_sided_complex_rules=False))
+    restricted = filtered_rules(transactions, settings)
+    unrestricted = filtered_rules(transactions, settings.replace(one_sided_complex_rules=False))
 
     for kind in ("attracts", "avoids"):
         all_rules = unrestricted[unrestricted.kind == kind]

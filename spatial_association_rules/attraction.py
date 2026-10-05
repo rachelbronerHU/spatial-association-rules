@@ -70,6 +70,6 @@ def mine_attraction(transactions, matrix, item_index, settings):
                 continue
             splits.append((antecedent, consequent, support, ant_support, con_support))
 
-    rules = rules_from(splits, settings, n, attracts, ATTRACTS)
+    rules, raw_rules = rules_from(splits, settings, n, attracts, ATTRACTS)
     logger.debug(f"Attraction: {len(supports)} itemsets measured, {len(rules)} rules")
-    return rules
+    return rules, raw_rules

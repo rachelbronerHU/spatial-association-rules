@@ -145,7 +145,7 @@ def mine_avoidance(matrix, item_index, settings, sample_id: str = ""):
 
     n = matrix.shape[0]
     if n == 0:
-        return frame_of([])
+        return frame_of([]), frame_of([])
 
     sides = sides_worth_pairing(matrix, item_index, settings, n)
     # A side of no support divides nothing and judges nothing, so it never pairs.
@@ -172,7 +172,7 @@ def mine_avoidance(matrix, item_index, settings, sample_id: str = ""):
 
     joint = joint_supports({ant | con for ant, con, _, _ in pairs}, matrix, item_index)
 
-    rules = rules_from([(ant, con, joint[ant | con], ant_support, con_support)
+    rules, raw_rules = rules_from([(ant, con, joint[ant | con], ant_support, con_support)
                         for ant, con, ant_support, con_support in pairs],
                        settings, n, avoids, AVOIDS)
 
@@ -180,4 +180,4 @@ def mine_avoidance(matrix, item_index, settings, sample_id: str = ""):
     logger.info(f"{prefix}Avoidance: {len(sides)} sides worth pairing, "
                 f"{len(joint)} joint supports measured, {len(rules)} rules")
 
-    return rules
+    return rules, raw_rules

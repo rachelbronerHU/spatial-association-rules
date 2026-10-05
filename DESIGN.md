@@ -71,6 +71,10 @@ filtering.
 
 ## Testing many rules at once
 
+`raw_rules` holds rules after their metrics are measured, before the final
+thresholds and rare-label filter. It excludes candidates pruned earlier by the
+attraction support floor or avoidance search. Only `rules` are shuffled and classified.
+
 Searching many rules makes chance findings more likely. `add_p_values()` returns
 the raw `p_value` and, by default, a corrected value, `individual_fdr`. Set
 `calculate_fdr=False` to request raw p-values alone. The correction uses
@@ -240,6 +244,8 @@ References:
 ## Conditional shuffle tests
 
 `Result.add_conditional_p_values` is an optional second step after `add_p_values`.
+It returns separate `(rules, comparisons)` tables; `run_samples` exposes these as
+`report.rules()` and `report.comparisons()`, both with `sample_id`.
 It preserves the original p-values and FDR, and does not change classification.
 `run_samples(n_conditional_shuffles=...)` runs it before classification.
 
@@ -295,8 +301,9 @@ Paneth and Epithelial also freezes every type in
 
 ### Combining and interpreting results
 
-`conditional_tests` stores the parent, metric, observed gain, fixed types, status, and p-value for
-every comparison. `conditional_p_value` is their maximum. Thus every required
+The separate `comparisons` table stores the parent, metric, observed gain, fixed
+types, status, and p-value for every comparison. `conditional_p_value` in the rules
+table is their maximum. Thus every required
 comparison must have a small p-value. If any is untestable, retain the individual
 results but leave the combined value missing. No qualifying parent also means missing.
 

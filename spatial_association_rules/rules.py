@@ -235,22 +235,22 @@ def rules_from(splits, settings, n_transactions, judge, kind):
 
     splits: (antecedent, consequent, joint, ant_support, con_support) tuples.
     judge:  attracts() or avoids().
+    Return (passed rules, all rules measured before the final thresholds).
     """
     if not splits:
-        return empty_rules()
+        return empty_rules(), empty_rules()
 
     joint = np.fromiter((s[2] for s in splits), dtype=float, count=len(splits))
     ant_support = np.fromiter((s[3] for s in splits), dtype=float, count=len(splits))
     con_support = np.fromiter((s[4] for s in splits), dtype=float, count=len(splits))
 
     measures = metrics(joint, ant_support, con_support)
-    kept = np.flatnonzero(judge(settings, joint, ant_support, con_support,
-                                measures, n_transactions))
+    passed = judge(settings, joint, ant_support, con_support, measures, n_transactions)
 
     rows = [rule_row(splits[i][0], splits[i][1], joint[i], ant_support[i], con_support[i],
                      tuple(measure[i] for measure in measures), kind)
-            for i in kept]
-    return frame_of(rows)
+            for i in range(len(splits))]
+    return frame_of([row for row, keep in zip(rows, passed) if keep]), frame_of(rows)
 
 
 def frame_of(rows):

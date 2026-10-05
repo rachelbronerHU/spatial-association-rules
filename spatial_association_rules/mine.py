@@ -20,10 +20,10 @@ from .validation.false_discovery import fdr_by_size, fdr_families
 from .transactions import Patch, build_transactions, find_patches, measure_patches
 
 
-def mine_rules(transactions, settings: Settings, sample_id: str = "") -> pd.DataFrame:
-    """Transactions in, rules out: both searches, one frame."""
+def mine_rules(transactions, settings: Settings, sample_id: str = ""):
+    """Return passed rules and rules before the final filters."""
     if not transactions:
-        return empty_rules()
+        return empty_rules(), empty_rules()
 
     matrix, item_index = weight_matrix(transactions)
     
@@ -42,8 +42,9 @@ def mine_rules(transactions, settings: Settings, sample_id: str = "") -> pd.Data
     prefix = f"[{sample_id}] " if sample_id else ""
     logger.info(f"{prefix}{str_attraction_time} {'| ' + str_avoidance_time if str_avoidance_time else ''}")
 
-    found = [frame for frame in found if not frame.empty]
-    return pd.concat(found, ignore_index=True) if found else empty_rules()
+    rules, raw_rules = ([frame for frame in frames if not frame.empty] for frames in zip(*found))
+    return (pd.concat(rules, ignore_index=True) if rules else empty_rules(),
+            pd.concat(raw_rules, ignore_index=True) if raw_rules else empty_rules())
 
 
 @dataclass
@@ -55,6 +56,7 @@ class Result:
     patches: List[Patch] = field(repr=False)
     labels: np.ndarray = field(repr=False)
     settings: Settings = field(repr=False)
+    raw_rules: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
 
     def add_p_values(self, n_shuffles, random_seed=None, labels_kept_fixed=(), sample_id="",
                      max_individual_fdr=None, calculate_fdr=True):
@@ -97,7 +99,7 @@ class Result:
     def add_conditional_p_values(self, tested, *, n_shuffles, max_individual_fdr=0.05,
                                  random_seed=None, labels_kept_fixed=(), sample_id="",
                                  calculate_fdr=True):
-        """Test gains with simpler types fixed; optionally add conditional_fdr.
+        """Return (rules, comparisons) with optional conditional_fdr.
 
         Inherits fixed labels recorded by add_p_values; labels_kept_fixed adds more.
         Requires individual_fdr to select parents. If correction is requested, warns
@@ -119,6 +121,7 @@ def mine(coords, labels, settings: Settings, sample_id: str = "") -> Result:
     labels:  (n_cells,) one label per cell, one label per cell type
 
     No significance testing here — call result.add_p_values() for that.
+    Rules before the final filters are in result.raw_rules.
     """
     coords = np.asarray(coords, dtype=float)
     labels = np.asarray(labels, dtype=object)
@@ -130,7 +133,10 @@ def mine(coords, labels, settings: Settings, sample_id: str = "") -> Result:
     transactions, stats = build_transactions(measured, labels, settings)
     stats["patches_found"] = len(patches)
 
+    rules, raw_rules = mine_rules(transactions, settings, sample_id)
     # Rare labels go first: the shuffle test after them is what the run pays for.
-    rules = drop_rare_labels(mine_rules(transactions, settings, sample_id=sample_id), labels, settings)
+    rules = drop_rare_labels(rules, labels, settings)
+    rules = rules.assign(rule_idx=np.arange(len(rules)))
 
-    return Result(rules=rules, stats=stats, patches=measured, labels=labels, settings=settings)
+    return Result(rules=rules, stats=stats, patches=measured, labels=labels,
+                  settings=settings, raw_rules=raw_rules)

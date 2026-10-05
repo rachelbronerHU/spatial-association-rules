@@ -98,12 +98,14 @@ def test_one_sample_workflow_from_p_values_to_classification():
     assert plan.fixed_types.tolist() == [("A", "C")]
     assert plan.status.tolist() == ["ready"]
 
-    tested = result.add_conditional_p_values(original, n_shuffles=19,
-                                              random_seed=7, max_individual_fdr=1)
+    tested, comparisons = result.add_conditional_p_values(
+        original, n_shuffles=19, random_seed=7, max_individual_fdr=1,
+    )
     assert tested.conditional_p_value.iloc[1] == pytest.approx(0.3)
     assert tested.conditional_fdr.iloc[1] == 1.0
-    assert tested.conditional_tests.iloc[1][0]["p_value"] == pytest.approx(0.3)
-    assert tested.conditional_tests.iloc[1][0]["observed_gain"] == pytest.approx(2.0)
+    assert "conditional_tests" not in tested
+    assert comparisons.p_value.tolist() == pytest.approx([0.3])
+    assert comparisons.observed_gain.tolist() == pytest.approx([2.0])
 
     classified = classify_rules(tested, max_individual_fdr=1)
     assert classified.rule_type.tolist() == ["pairwise", "complex-antecedents"]
@@ -132,9 +134,9 @@ def test_p_value_matches_explicit_patch_arithmetic(monkeypatch, weighting, conse
     expected = (1 + sum(score >= observed or np.isclose(score, observed)
                         for score in shuffled_scores)) / 5 if observed > 1 else 1.0
     enumerate_four_shuffles(monkeypatch)
-    tested = result.add_conditional_p_values(rules, n_shuffles=4, random_seed=10)
+    tested, comparisons = result.add_conditional_p_values(rules, n_shuffles=4, random_seed=10)
     assert tested.conditional_p_value.iloc[-1] == pytest.approx(expected)
-    assert tested.conditional_tests.iloc[-1][0]["observed_gain"] == pytest.approx(observed)
+    assert comparisons.observed_gain.iloc[0] == pytest.approx(observed)
     assert tested.conditional_status.iloc[-1] == "tested"
     pd.testing.assert_frame_equal(tested[rules.columns], rules)
 
@@ -146,7 +148,7 @@ def test_fixed_comparison_is_conservative_over_its_entire_small_null(monkeypatch
         result, rules = sample(weighting)
         result.labels[[6, b_position]] = result.labels[[b_position, 6]]
         enumerate_four_shuffles(monkeypatch)
-        tested = result.add_conditional_p_values(rules, n_shuffles=4)
+        tested, _ = result.add_conditional_p_values(rules, n_shuffles=4)
         p_values.append(tested.conditional_p_value.iloc[-1])
     for cutoff in [0.05, 0.2, 0.4, 0.6, 0.8]:
         assert np.mean(np.array(p_values) <= cutoff) <= cutoff
@@ -180,12 +182,13 @@ def test_two_parents_use_separate_batches_and_combine_with_max():
     assert set(plan.fixed_types) == {("A", "C"), ("B", "C")}
     assert plan.attrs["shuffle_batches"] == 2
     # A cutoff of 1 needs no minimum shuffles, so conditional_fdr is calculated.
-    tested = result.add_conditional_p_values(rules, n_shuffles=39, random_seed=17,
-                                             max_individual_fdr=1)
-    details = tested.conditional_tests.iloc[-1]
+    tested, comparisons = result.add_conditional_p_values(
+        rules, n_shuffles=39, random_seed=17, max_individual_fdr=1,
+    )
+    details = comparisons.loc[comparisons.rule_idx == len(rules) - 1]
     assert len(details) == 2
-    assert all(test["status"] == "tested" for test in details)
-    assert tested.conditional_p_value.iloc[-1] == max(test["p_value"] for test in details)
+    assert details.status.tolist() == ["tested", "tested"]
+    assert tested.conditional_p_value.iloc[-1] == details.p_value.max()
     # Four labels give 4 * C(4, 2) * 3 splits * 2 kinds = 144 candidates.
     assert tested.conditional_fdr.iloc[-1] == min(1, 144 * tested.conditional_p_value.iloc[-1])
     assert tested.conditional_fdr.iloc[:-1].isna().all()
@@ -203,7 +206,7 @@ def test_rules_with_the_same_fixed_types_share_shuffles(monkeypatch):
         return rebuild(*args)
 
     monkeypatch.setattr(conditional, "_transactions", capture)
-    tested = result.add_conditional_p_values(rules, n_shuffles=19, random_seed=6)
+    tested, _ = result.add_conditional_p_values(rules, n_shuffles=19, random_seed=6)
     assert len(calls) == 20  # One observed rebuild, then one shared batch.
     assert tested.conditional_p_value.iloc[1] == tested.conditional_p_value.iloc[2]
     assert tested.attrs["conditional_test_summary"]["shuffle_batches"] == 1
@@ -211,11 +214,19 @@ def test_rules_with_the_same_fixed_types_share_shuffles(monkeypatch):
 
 def test_reordering_rows_does_not_change_the_seeded_results():
     result, rules = sample(two_parents=True)
-    first = result.add_conditional_p_values(rules, n_shuffles=29, random_seed=13)
+    first, _ = result.add_conditional_p_values(rules, n_shuffles=29, random_seed=13)
     reordered = rules.iloc[::-1]
-    second = result.add_conditional_p_values(reordered, n_shuffles=29, random_seed=13)
+    second, _ = result.add_conditional_p_values(reordered, n_shuffles=29, random_seed=13)
     pd.testing.assert_series_equal(first.conditional_p_value, second.conditional_p_value.iloc[::-1])
     pd.testing.assert_series_equal(first.conditional_fdr, second.conditional_fdr.iloc[::-1])
+
+
+def test_comparisons_use_stored_rule_ids_not_row_positions():
+    result, rules = sample(two_parents=True)
+    rules = rules.assign(rule_idx=[10, 11, 12]).iloc[::-1]
+    _, comparisons = result.add_conditional_p_values(rules, n_shuffles=9, random_seed=13)
+    assert comparisons.rule_idx.tolist() == [12, 12]
+    assert set(comparisons.simpler_idx) == {10, 11}
 
 
 @pytest.mark.parametrize("fdr", [0.9, np.nan])
@@ -223,15 +234,16 @@ def test_only_significant_parents_are_tested(fdr):
     result, rules = sample()
     rules.loc[0, "individual_fdr"] = fdr
     assert result.conditional_test_plan(rules).empty
-    tested = result.add_conditional_p_values(rules, n_shuffles=9)
+    tested, comparisons = result.add_conditional_p_values(rules, n_shuffles=9)
     assert tested.conditional_status.iloc[-1] == "no_significant_simpler"
     assert pd.isna(tested.conditional_p_value.iloc[-1])
+    assert comparisons.empty
 
 
 def test_parent_kind_does_not_restrict_the_comparison():
     result, rules = sample()
     rules.loc[0, "kind"] = "avoids"
-    tested = result.add_conditional_p_values(rules, n_shuffles=9, random_seed=2)
+    tested, _ = result.add_conditional_p_values(rules, n_shuffles=9, random_seed=2)
     assert tested.conditional_status.iloc[-1] == "tested"
 
 
@@ -251,7 +263,7 @@ def test_impossible_comparisons_are_missing_not_significant(case, reason):
         rules.at[1, "antecedents"] = ("A_CENTER", "Missing_NEIGHBOR")
     plan = result.conditional_test_plan(rules)
     assert plan.status.tolist() == [reason]
-    tested = result.add_conditional_p_values(rules, n_shuffles=9)
+    tested, _ = result.add_conditional_p_values(rules, n_shuffles=9)
     assert tested.conditional_status.iloc[-1] == "untestable"
     assert pd.isna(tested.conditional_p_value.iloc[-1])
     assert tested.attrs["conditional_test_summary"]["shuffle_batches"] == 0
@@ -260,8 +272,8 @@ def test_impossible_comparisons_are_missing_not_significant(case, reason):
 def test_one_untestable_parent_prevents_a_partial_combined_p_value():
     result, rules = sample(two_parents=True)
     rules.attrs["labels_kept_fixed"] = ("A",)
-    tested = result.add_conditional_p_values(rules, n_shuffles=9, random_seed=4)
-    assert {test["status"] for test in tested.conditional_tests.iloc[-1]} == {"tested", "all_rule_types_fixed"}
+    tested, comparisons = result.add_conditional_p_values(rules, n_shuffles=9, random_seed=4)
+    assert set(comparisons.status) == {"tested", "all_rule_types_fixed"}
     assert pd.isna(tested.conditional_p_value.iloc[-1])
 
 
@@ -277,19 +289,21 @@ def test_crowding_filter_is_reapplied_for_observed_and_shuffled_tissues(monkeypa
         shuffled[6:10] = result.labels[np.roll(np.arange(6, 10), shift)]
         scores.append(direct_score(result, rules, shuffled))
     expected = (1 + sum(score >= observed for score in scores)) / 5
-    tested = result.add_conditional_p_values(rules, n_shuffles=4)
+    tested, _ = result.add_conditional_p_values(rules, n_shuffles=4)
     assert tested.conditional_p_value.iloc[-1] == pytest.approx(expected)
 
 
 def test_pairwise_mixed_and_empty_frames_are_not_tested():
     result, rules = sample()
     rules = pd.DataFrame([rules.iloc[0].to_dict(), rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR", "D_NEIGHBOR"])])
-    tested = result.add_conditional_p_values(rules, n_shuffles=9)
+    tested, comparisons = result.add_conditional_p_values(rules, n_shuffles=9)
     assert tested.conditional_status.tolist() == ["not_applicable", "not_applicable"]
     assert tested.conditional_p_value.isna().all()
     assert tested.conditional_fdr.isna().all()
-    empty = result.add_conditional_p_values(rules.iloc[:0], n_shuffles=9)
+    assert comparisons.empty
+    empty, empty_comparisons = result.add_conditional_p_values(rules.iloc[:0], n_shuffles=9)
     assert empty.empty
+    assert empty_comparisons.empty
     assert "conditional_p_value" in empty
     assert "conditional_fdr" in empty
 
@@ -298,8 +312,8 @@ def test_duplicate_indices_and_original_columns_are_preserved():
     result, rules = sample()
     rules.index = [8, 8]
     original = rules.copy(deep=True)
-    tested = result.add_conditional_p_values(rules, n_shuffles=9, random_seed=2,
-                                             max_individual_fdr=1)
+    tested, _ = result.add_conditional_p_values(rules, n_shuffles=9, random_seed=2,
+                                                max_individual_fdr=1)
     pd.testing.assert_frame_equal(rules, original)
     pd.testing.assert_frame_equal(tested[original.columns], original)
     assert tested.conditional_status.tolist() == ["not_applicable", "tested"]
@@ -330,9 +344,9 @@ def test_missing_fdr_column_does_not_silently_enable_all_parents():
 def test_undefined_observed_metric_is_untestable():
     result, rules = sample(consequent=True)
     result.labels[[6, 8]] = result.labels[[8, 6]]  # B and C never co-occur anywhere.
-    tested = result.add_conditional_p_values(rules, n_shuffles=9)
+    tested, comparisons = result.add_conditional_p_values(rules, n_shuffles=9)
     assert tested.conditional_status.iloc[-1] == "untestable"
-    assert tested.conditional_tests.iloc[-1][0]["status"] == "undefined_metric"
+    assert comparisons.status.tolist() == ["undefined_metric"]
     assert pd.isna(tested.conditional_p_value.iloc[-1])
 
 
@@ -397,7 +411,7 @@ def test_conditional_fdr_counts_only_enabled_kinds():
 
 def test_too_few_shuffles_warns_and_leaves_conditional_fdr_missing(caplog):
     result, rules = sample()
-    tested = result.add_conditional_p_values(rules, n_shuffles=9, sample_id="FOV1")
+    tested, _ = result.add_conditional_p_values(rules, n_shuffles=9, sample_id="FOV1")
     # 144 candidates and one tested rule need 2879 shuffles to reach BH <= 0.05.
     assert "[FOV1] Insufficient permutation resolution for 3-item" in caplog.text
     assert "At least 2879 shuffles" in caplog.text
@@ -407,8 +421,8 @@ def test_too_few_shuffles_warns_and_leaves_conditional_fdr_missing(caplog):
 
 def test_conditional_p_values_can_be_requested_without_fdr(caplog):
     result, rules = sample()
-    tested = result.add_conditional_p_values(rules, n_shuffles=9, random_seed=4,
-                                             calculate_fdr=False)
+    tested, _ = result.add_conditional_p_values(rules, n_shuffles=9, random_seed=4,
+                                                calculate_fdr=False)
     assert np.isfinite(tested.conditional_p_value.iloc[1])
     assert "conditional_fdr" not in tested
     assert "Insufficient permutation resolution" not in caplog.text

@@ -94,6 +94,11 @@ report.rules()      # every rule, with raw p-values and a sample_id column
 report.failures     # (sample_id, traceback) for samples that raised
 ```
 
+`result.raw_rules` and `report.raw_rules()` return a separate
+table of rules measured before the final mining thresholds and rare-label filter.
+It has no p-values; earlier search pruning still applies. The library does not save
+this table unless you choose to.
+
 A sample that raises is recorded and the rest carry on. If every sample fails, that
 raises.
 
@@ -104,11 +109,12 @@ Results come back as DataFrames.
 
 One row per rule. `mine` gives the first block, `add_p_values` the second,
 `classify_rules` the third, and `run_samples` adds `sample_id`.
-The optional conditional test adds the last four columns below.
+The optional conditional test adds the last three columns below.
 
 | column | what it is |
 |---|---|
 | `antecedents`, `consequents` | the two sides, as tuples of items like `CD8T_CENTER` |
+| `rule_idx` | the rule's id within its sample, set by `mine`; `comparisons` refers to it |
 | `kind` | `"attracts"` or `"avoids"` — which search found it |
 | `support` | how often the whole rule appears |
 | `antecedent support`, `consequent support` | the same, for each side alone |
@@ -124,7 +130,6 @@ The optional conditional test adds the last four columns below.
 | `conditional_p_value` | largest p-value across the conditional comparisons; missing if any required comparison is untestable |
 | `conditional_fdr` | optional corrected conditional p-value within this sample and rule size; missing when the conditional p-value is missing or too few shuffles can meet `max_individual_fdr` |
 | `conditional_status` | `tested`, `no_significant_simpler`, `not_applicable`, or `untestable` |
-| `conditional_tests` | each simpler rule, fixed types, metric, observed gain, status, and raw conditional p-value |
 
 ## Pipeline
 
@@ -209,7 +214,7 @@ plan = result.conditional_test_plan(tested, max_individual_fdr=0.05)
 print(plan[["rule", "simpler_rule", "fixed_types", "status"]])
 print(plan.attrs["shuffle_batches"])  # upper bound on separate shuffle batches
 
-conditional = result.add_conditional_p_values(
+conditional, comparisons = result.add_conditional_p_values(
     tested, n_shuffles=1000, random_seed=42, max_individual_fdr=0.05,
 )
 rules = classify_rules(conditional, max_individual_fdr=0.05)
@@ -224,12 +229,19 @@ gains at least as large as the observed gain. The p-value is `(count + 1) / (shu
 The combined value is the **largest** comparison p-value. A rule with no observed
 improvement gets 1 for that comparison.
 
+`comparisons` is a separate table, one row per significant simpler rule. It shows
+the rule, simpler rule, fixed types, metric, observed gain, p-value, and status.
+`rule_idx` and `simpler_idx` link each comparison to rows of `conditional` by their
+`rule_idx`. In multi-sample runs, `report.comparisons()` combines every sample's
+comparisons with `sample_id`; join them to `report.rules()` on
+`["sample_id", "rule_idx"]`.
+
 Set `calculate_fdr=False` in `add_conditional_p_values` to keep the comparison and
 combined p-values without calculating or returning `conditional_fdr`.
 
 Pairwise and mixed rules are not tested. No significant simpler rule, undefined
 metrics, all relevant types fixed, or no remaining labels that can change means a
-missing conditional p-value. `conditional_tests` gives the reason. Partial results
+missing conditional p-value. `comparisons` gives the reason. Partial results
 are retained, but an untestable comparison leaves the combined value missing.
 
 `conditional_fdr` applies Benjamini–Hochberg to one combined p-value per rule,

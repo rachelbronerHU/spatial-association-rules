@@ -30,6 +30,8 @@ class SampleResult:
     sample_id: object
     rules: pd.DataFrame     # every rule, with raw p-values and classification columns
     stats: dict
+    comparisons: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
+    raw_rules: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
 
 
 @dataclass
@@ -43,6 +45,18 @@ class RunReport:
         """Every sample's rules in one frame, with a sample_id column."""
         frames = [r.rules.assign(sample_id=r.sample_id)
                   for r in self.results if not r.rules.empty]
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    def raw_rules(self) -> pd.DataFrame:
+        """Rules before final filters, with sample_id."""
+        frames = [r.raw_rules.assign(sample_id=r.sample_id)
+                  for r in self.results if not r.raw_rules.empty]
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    def comparisons(self) -> pd.DataFrame:
+        """Every sample's conditional comparisons, with sample_id."""
+        frames = [r.comparisons.assign(sample_id=r.sample_id)
+                  for r in self.results if not r.comparisons.empty]
         return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
@@ -154,8 +168,9 @@ def _run_one(task):
             max_individual_fdr=task.max_individual_fdr,
             calculate_fdr=task.calculate_individual_fdr,
         )
+        comparisons = pd.DataFrame()
         if task.n_conditional_shuffles is not None:
-            tested = result.add_conditional_p_values(
+            tested, comparisons = result.add_conditional_p_values(
                 tested, n_shuffles=task.n_conditional_shuffles,
                 max_individual_fdr=task.max_individual_fdr, random_seed=task.seed,
                 labels_kept_fixed=task.kept_fixed, sample_id=task.sample_id,
@@ -170,7 +185,8 @@ def _run_one(task):
         logger.info(f"[{task.sample_id}] {result.stats['patches_kept']} transactions, "
                     f"{len(result.rules)} mined, "
                     f"{int(classified['adds_information'].sum())} add information")
-        return SampleResult(task.sample_id, classified, result.stats), None
+        return SampleResult(task.sample_id, classified, result.stats, comparisons,
+                            result.raw_rules), None
     except Exception:
         return None, (task.sample_id, traceback.format_exc())
 

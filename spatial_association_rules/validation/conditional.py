@@ -132,7 +132,12 @@ def conditional_p_values(rules, patches, labels, settings, *, n_shuffles,
         comparisons=len(plan), shuffle_batches=batches, n_shuffles=n_shuffles,
         shuffled_tissues=batches * n_shuffles,
     )
-    return result
+    # Report stored rule ids, so comparisons still match after rules are filtered or sorted.
+    ids = rules["rule_idx"].to_numpy() if "rule_idx" in rules else np.arange(len(rules))
+    comparisons = plan.rename(columns={"rule_pos": "rule_idx", "simpler_pos": "simpler_idx"})
+    comparisons["rule_idx"] = ids[plan.rule_pos.to_numpy(dtype=int)]
+    comparisons["simpler_idx"] = ids[plan.simpler_pos.to_numpy(dtype=int)]
+    return result, comparisons
 
 
 def check_shuffle_count(value, name):
@@ -183,25 +188,22 @@ def _scores(values, comparisons, positions):
 
 def _attach_results(rules, plan):
     result = rules.copy()
-    details = [[] for _ in range(len(rules))]
-    for comparison in plan.to_dict("records"):
-        details[comparison["rule_pos"]].append(comparison)
+    by_rule = {pos: group for pos, group in plan.groupby("rule_pos")}
     p_values, statuses = [], []
     for pos, row in enumerate(rules.itertuples(index=False)):
-        comparisons = details[pos]
+        comparisons = by_rule.get(pos)
         p_value = np.nan
         if _rule_type(len(row.antecedents), len(row.consequents)) in ("pairwise", "complex-mixed"):
             status = "not_applicable"
-        elif not comparisons:
+        elif comparisons is None:
             status = "no_significant_simpler"
-        elif any(pd.isna(test["p_value"]) for test in comparisons):
+        elif comparisons["p_value"].isna().any():
             status = "untestable"
         else:
-            p_value = max(test["p_value"] for test in comparisons)
+            p_value = comparisons["p_value"].max()
             status = "tested"
         p_values.append(p_value)
         statuses.append(status)
     result["conditional_p_value"] = pd.Series(p_values, index=result.index, dtype=float)
     result["conditional_status"] = pd.Series(statuses, index=result.index, dtype=object)
-    result["conditional_tests"] = details
     return result
