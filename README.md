@@ -102,7 +102,8 @@ this table unless you choose to.
 A sample that raises is recorded and the rest carry on. If every sample fails, that
 raises.
 
-The library writes nothing except `run_config.json`, and only if you pass `output_path`.
+By default, the library writes only `run_config.json`, and only if you pass `output_path`.
+Optional permutation recording also writes compressed metric arrays; see below.
 Results come back as DataFrames.
 
 ## What comes back
@@ -319,6 +320,7 @@ and references.
 | `samples` | iterable of `(sample_id, coords, labels)`. Not a DataFrame, so no column names are assumed |
 | `workers` | `None` runs here. An integer runs that many **processes** — mining is CPU-bound. On Windows, guard the caller with `if __name__ == "__main__"` |
 | `output_path` | where to write `run_config.json`. `None` writes nothing |
+| `save_permutation_metrics` | default `False`; record per-sample shuffle metrics. Requires `output_path` |
 | `n_conditional_shuffles` | optional extra conditional testing before classification; default `None` disables it. Requires `max_individual_fdr` |
 | `calculate_individual_fdr` | default `True`; `False` returns raw p-values without individual correction. Requires `max_individual_fdr=None` and disables conditional testing |
 | `calculate_conditional_fdr` | default `True`; `False` keeps conditional p-values without conditional correction when conditional testing is enabled |
@@ -328,6 +330,53 @@ and references.
 
 Each sample derives its own seed from `random_seed`, so a parallel run matches a serial
 one.
+
+### Optional permutation metrics
+
+Set `save_permutation_metrics=True` in `run_samples` with an `output_path` to save
+shuffle distributions. The default is `False`; recording does not change test results.
+Files are written by each worker under `output_path/permutations/sample_<id>/`,
+with URL-encoded sample IDs. Each sample gets `individual.npz` and one
+`conditional_0001.npz`, etc., per conditional batch actually shuffled. Skipped tests
+write no archive. Recording uses additional temporary disk space. Python chooses the
+temporary folder automatically; on a cluster, set `TMPDIR` to local disk in the job
+script if needed. Final archives still go under `output_path`.
+
+`run_samples` rejects a non-empty permutation folder or sample IDs sharing a folder.
+Use a fresh output location or clear the permutation folder before re-running.
+Existing archives are never overwritten or deleted.
+
+See [the recording design](DESIGN.md#recording-permutation-metrics) for buffering,
+memory use, and cleanup.
+
+Each `.npz` contains:
+
+| array | meaning |
+|---|---|
+| `rule_idx` | rule IDs identifying metric columns, matching the returned rules |
+| `lift`, `conviction` | float64 arrays with shape `(permutations, rules)` |
+| `passed_mining_filters` | boolean array with the same shape, individual tests only |
+| `sample_id`, `test` | string scalars identifying the sample and test |
+| `fixed_types` | cell types held fixed in this batch |
+
+Rows identify permutations in execution order. Undefined metrics are `NaN`; infinite
+conviction is retained. Conditional archives include both complex and simpler rules
+measured in that batch. Use the existing comparisons table and `fixed_types` to find
+rule pairs, then calculate gains from their metrics in the same permutation.
+No duplicate simpler-rule IDs or gain arrays are stored.
+
+```python
+with np.load("output/permutations/sample_FOV1/individual.npz") as data:
+    column = np.flatnonzero(data["rule_idx"] == rule_idx)[0]
+    shuffled_lifts = data["lift"][:, column]
+    # The individual test counts passes of mining thresholds, rather than lift exceedances.
+    p_value = (data["passed_mining_filters"][:, column].sum() + 1) / (len(shuffled_lifts) + 1)
+```
+
+For single-sample calls, pass `permutation_dir` (for example, `"output/permutations"`)
+to `Result.add_p_values` or `Result.add_conditional_p_values`. The shared saver builds
+every sample folder and batch filename under that directory. `permutation_dir` defaults
+to `None`, which writes no permutation files.
 
 ## Attraction and avoidance
 

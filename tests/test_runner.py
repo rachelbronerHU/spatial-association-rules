@@ -99,7 +99,7 @@ def test_runner_can_add_conditional_tests_and_records_the_budget(monkeypatch, tm
     assert report.rules().complex_class.iloc[1] == "stronger_than_simpler"
     assert seen == dict(n_shuffles=29, random_seed=runner.seed_for(7, "sample"),
                         max_individual_fdr=0.05, labels_kept_fixed=("D",), sample_id="sample",
-                        calculate_fdr=True)
+                        calculate_fdr=True, permutation_dir=None)
     config = json.loads((tmp_path / "run_config.json").read_text())
     assert config["steps"]["n_shuffles"] == 100
     assert isinstance(config["steps"]["n_shuffles"], int)

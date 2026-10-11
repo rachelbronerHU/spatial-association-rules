@@ -120,7 +120,7 @@ def test_resolution_check_precedes_shuffles_and_only_skips_impossible_sizes(
     ], columns=["antecedents", "consequents", "kind"], index=[42, 7, 9])
     result = Result(mined, {}, [], np.array(["A", "B", "C"]), settings)
 
-    def shuffling(rules, *args):
+    def shuffling(rules, *args, permutation_dir=None):
         # A blocked size still gets its raw p-values, so every mined rule is shuffled.
         assert len(rules) == 3
         assert len(caplog.records) == len(blocked), "warnings must precede shuffling"
@@ -158,7 +158,7 @@ def test_raw_p_values_can_be_requested_without_fdr(monkeypatch):
                          columns=["antecedents", "consequents", "kind"])
     result = Result(rules, {}, [], np.array(["A", "B"]), settings)
     module = import_module("spatial_association_rules.mine")
-    monkeypatch.setattr(module, "p_values_for", lambda *args: np.array([0.2]))
+    monkeypatch.setattr(module, "p_values_for", lambda *args, permutation_dir=None: np.array([0.2]))
     monkeypatch.setattr(module, "fdr_families", lambda *args, **kwargs: pytest.fail("FDR ran"))
 
     tested = result.add_p_values(9, calculate_fdr=False)

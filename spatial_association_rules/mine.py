@@ -59,7 +59,7 @@ class Result:
     raw_rules: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
 
     def add_p_values(self, n_shuffles, random_seed=None, labels_kept_fixed=(), sample_id="",
-                     max_individual_fdr=None, calculate_fdr=True):
+                     max_individual_fdr=None, calculate_fdr=True, permutation_dir=None):
         """
         Return raw p-values and, if requested, individual_fdr for this sample.
         Correct each rule size separately, with attraction and avoidance together.
@@ -68,6 +68,7 @@ class Result:
         set, warn if too few shuffles are planned for any rule of a size to pass.
         Those sizes still get raw p-values, but individual_fdr is NaN (missing).
         A cutoff of None skips this check; calculate_fdr chooses whether to correct.
+        If permutation_dir is set, save shuffle metrics under that directory.
         """
         if not isinstance(calculate_fdr, bool):
             raise ValueError("calculate_fdr must be a bool")
@@ -86,6 +87,7 @@ class Result:
         rules["p_value"] = p_values_for(
             rules, self.patches, self.labels, self.settings,
             n_shuffles, random_seed, labels_kept_fixed, sample_id,
+            permutation_dir=permutation_dir,
         )
         if calculate_fdr:
             rules["individual_fdr"] = fdr_by_size(rules, rules["p_value"], families)
@@ -98,18 +100,20 @@ class Result:
 
     def add_conditional_p_values(self, tested, *, n_shuffles, max_individual_fdr=0.05,
                                  random_seed=None, labels_kept_fixed=(), sample_id="",
-                                 calculate_fdr=True):
+                                 calculate_fdr=True, permutation_dir=None):
         """Return (rules, comparisons) with optional conditional_fdr.
 
         Inherits fixed labels recorded by add_p_values; labels_kept_fixed adds more.
         Requires individual_fdr to select parents. If correction is requested, warns
         when too few shuffles can reach the cutoff. See DESIGN.md.
+        If permutation_dir is set, save batch metrics under that directory.
         """
         return conditional_p_values(
             tested, self.patches, self.labels, self.settings, n_shuffles=n_shuffles,
             max_individual_fdr=max_individual_fdr, random_seed=random_seed,
             labels_kept_fixed=labels_kept_fixed, sample_id=sample_id,
             calculate_fdr=calculate_fdr,
+            permutation_dir=permutation_dir,
         )
 
 

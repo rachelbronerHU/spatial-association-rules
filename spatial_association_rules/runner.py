@@ -19,6 +19,7 @@ from .mine import mine
 from .complex_rules import DEFAULT_IMPROVEMENT_GAIN
 from .rules import classify_rules
 from .validation.conditional import check_shuffle_count
+from .validation.permutations import sample_folder
 from .settings import Settings
 from .validation.significance import seed_for
 
@@ -75,13 +76,15 @@ class _SampleTask:
     n_conditional_shuffles: object
     calculate_individual_fdr: bool
     calculate_conditional_fdr: bool
+    permutation_dir: object = None
 
 
 def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
                 labels_kept_fixed=(), min_lift_gain=DEFAULT_IMPROVEMENT_GAIN, max_individual_fdr=None,
                 min_consequent_conviction_gain=DEFAULT_IMPROVEMENT_GAIN,
                 workers=None, output_path=None, n_conditional_shuffles=None,
-                calculate_individual_fdr=True, calculate_conditional_fdr=True) -> RunReport:
+                calculate_individual_fdr=True, calculate_conditional_fdr=True,
+                save_permutation_metrics=False) -> RunReport:
     """
     Mine every sample and report what came back, with raw p-values and nothing cut.
 
@@ -92,6 +95,7 @@ def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
     output_path:  where to write run_config.json. `None` writes nothing.
     n_conditional_shuffles: optional extra testing; requires max_individual_fdr.
     calculate_individual_fdr, calculate_conditional_fdr: whether to correct each test.
+    save_permutation_metrics: save per-sample shuffle arrays; requires output_path.
 
     A sample that raises lands in report.failures. If every sample fails, this raises.
     """
@@ -99,6 +103,10 @@ def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
         raise ValueError("calculate_individual_fdr and calculate_conditional_fdr must be bools")
     if not calculate_individual_fdr and max_individual_fdr is not None:
         raise ValueError("max_individual_fdr requires calculate_individual_fdr=True")
+    if not isinstance(save_permutation_metrics, bool):
+        raise ValueError("save_permutation_metrics must be a bool")
+    if save_permutation_metrics and output_path is None:
+        raise ValueError("save_permutation_metrics requires output_path")
     if isinstance(n_shuffles, np.integer):
         n_shuffles = int(n_shuffles)
     if n_conditional_shuffles is not None:
@@ -107,6 +115,7 @@ def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
         if max_individual_fdr is None or not 0 < max_individual_fdr <= 1:
             raise ValueError("conditional tests require max_individual_fdr in (0, 1]")
     setup_console_logging()
+    permutation_dir = os.path.join(output_path, "permutations") if save_permutation_metrics else None
     tasks = [
         _SampleTask(
             sample_id=sample_id, coords=coords, labels=labels, settings=settings,
@@ -117,11 +126,14 @@ def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
             n_conditional_shuffles=n_conditional_shuffles,
             calculate_individual_fdr=calculate_individual_fdr,
             calculate_conditional_fdr=calculate_conditional_fdr,
+            permutation_dir=permutation_dir,
         )
         for sample_id, coords, labels in samples
     ]
     if not tasks:
         raise ValueError("no samples were given")
+    if permutation_dir is not None:
+        _check_permutation_dir(permutation_dir, [task.sample_id for task in tasks])
 
     if output_path is not None:
         _save_config(output_path, settings, dict(
@@ -131,6 +143,7 @@ def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
             n_conditional_shuffles=n_conditional_shuffles,
             calculate_individual_fdr=calculate_individual_fdr,
             calculate_conditional_fdr=calculate_conditional_fdr,
+            save_permutation_metrics=save_permutation_metrics,
         ))
 
     logger.info(f"Mining {len(tasks)} samples" + (f" across {workers} processes" if workers else ""))
@@ -167,6 +180,7 @@ def _run_one(task):
             labels_kept_fixed=task.kept_fixed, sample_id=task.sample_id,
             max_individual_fdr=task.max_individual_fdr,
             calculate_fdr=task.calculate_individual_fdr,
+            permutation_dir=task.permutation_dir,
         )
         comparisons = pd.DataFrame()
         if task.n_conditional_shuffles is not None:
@@ -175,6 +189,7 @@ def _run_one(task):
                 max_individual_fdr=task.max_individual_fdr, random_seed=task.seed,
                 labels_kept_fixed=task.kept_fixed, sample_id=task.sample_id,
                 calculate_fdr=task.calculate_conditional_fdr,
+                permutation_dir=task.permutation_dir,
             )
         classified = classify_rules(
             tested, min_lift_gain=task.min_lift_gain,
@@ -202,8 +217,21 @@ def setup_console_logging(level=logging.INFO):
     package.setLevel(level)
 
 
+def _check_permutation_dir(permutation_dir, sample_ids):
+    """Refuse to mix runs, or two samples, in one permutation folder. The caller clears it."""
+    if os.path.isdir(permutation_dir) and os.listdir(permutation_dir):
+        raise ValueError(f"{permutation_dir} is not empty; clear it before saving permutation metrics")
+    # Case-folded, because Windows and macOS file names ignore case.
+    folders = {}
+    for sample_id in sample_ids:
+        folder = sample_folder(permutation_dir, sample_id).name.casefold()
+        if folder in folders:
+            raise ValueError(f"samples {folders[folder]!r} and {sample_id!r} share a permutation folder")
+        folders[folder] = sample_id
+
+
 def _save_config(output_path, settings, steps):
-    """Record what this run was asked to do. The only file the library writes."""
+    """Record what this run was asked to do, including optional metric recording."""
     os.makedirs(output_path, exist_ok=True)
     with open(os.path.join(output_path, "run_config.json"), "w") as f:
         record = {"settings": asdict(settings), "steps": steps}

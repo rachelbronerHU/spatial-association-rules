@@ -351,3 +351,34 @@ Seeds depend on the base seed and the fixed-type set, so reordering rows does no
 change results. In `run_samples`, the base seed is already specific to the sample.
 `add_p_values` records `labels_kept_fixed` in the returned frame's metadata. Conditional
 testing inherits that configuration and adds any extra fixed-label patterns.
+
+
+## Recording permutation metrics
+
+Optional recording reuses the measurements already made by individual and conditional
+tests, so enabling it does not change their results. Each archive stores the rule IDs
+and metrics for one sample and shuffle batch. Conditional batches include their complex
+and simpler rules; the existing comparisons table supplies the pairs. See the
+[README](README.md#optional-permutation-metrics) for the flag and archive contents.
+
+Arrays use Python's public `mmap` API with temporary files, allowing the operating
+system to reclaim their pages under memory pressure. Buffer space per worker is
+`shuffles × rules × 17` bytes for individual tests and × 16 for conditional tests.
+Python chooses the temporary directory, respecting `TMPDIR`, `TEMP`, and `TMP`, so
+buffers can use local disk while final archives go to the chosen output folder.
+Mapped pages still count toward resident memory, including job memory limits; this
+approach does not guarantee lower peak memory usage or prevent out-of-memory failures.
+A temporary folder backed by RAM does not offer the same disk-backed reclaim.
+
+Individual tests reuse two ordinary row buffers, then copy each row into the mapped
+arrays. This prevents the calculation from retaining views into memory that has been
+unmapped. Conditional tests already produce ordinary arrays and copy their values.
+Every row is filled as it is calculated, avoiding an initial write over every mapped
+page. The mapped arrays are valid only inside the recording context. On exit, their
+references are cleared, mappings are closed, and temporary files are removed.
+
+The sample folder is created only when the batch is ready to save. Early checks reject
+existing archives, non-empty run folders, and sample IDs mapping to the same folder
+when compared ignoring case. Exclusive archive creation also prevents concurrent
+writers from overwriting each other's files. If compression fails, the newly created
+archive is closed and removed; previously saved archives remain untouched.

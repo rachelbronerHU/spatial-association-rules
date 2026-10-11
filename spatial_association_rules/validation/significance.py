@@ -18,6 +18,7 @@ from ..avoidance import avoids
 from ..rules import AVOIDS, metrics, packed, support_of_many, support_of_many_packed
 from ..settings import Weighting
 from ..transactions import CENTER, NEIGHBOR, item_of
+from .permutations import record_permutations
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,8 @@ def seed_for(base_seed, sample_id):
     return base_seed + zlib.crc32(str(sample_id).encode())
 
 
-def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labels_kept_fixed, sample_id=""):
+def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labels_kept_fixed, sample_id="",
+                 *, permutation_dir=None):
     """The raw p-value for each rule, in order. Nothing is corrected here (no FDR)."""
 
     if rules.empty or n_shuffles <= 0:
@@ -78,7 +80,8 @@ def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labe
     # --- 3. LOCK FIXED CELLS ---
 
     # Identify which cells can be randomly reassigned vs which must stay anchored.
-    movable = np.arange(len(labels))[~_held_fixed(labels, labels_kept_fixed)]
+    fixed = _held_fixed(labels, labels_kept_fixed)
+    movable = np.flatnonzero(~fixed)
     _check_enough_moves(movable.size, len(labels), labels_kept_fixed)
     
     rng = np.random.default_rng(random_seed)
@@ -103,20 +106,34 @@ def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labe
     # 
     # The math instantly maps the fake labels onto the physical patches!
     survived = np.zeros(len(rules))
-    for i in range(n_shuffles):
-        order = np.arange(len(labels))
-        if movable.size > 1:
-            order[movable] = rng.permutation(movable)
-        shuffled = cell_labels[order, :]
+    rule_idx = None
+    fixed_types = ()
+    if permutation_dir is not None:
+        rule_idx = rules["rule_idx"].to_numpy() if "rule_idx" in rules else np.arange(len(rules))
+        fixed_types = tuple(sorted(set(labels[fixed])))
+    with record_permutations(permutation_dir, n_shuffles, rule_idx,
+                             sample_id=sample_id, test="individual", fixed_types=fixed_types) as recorded:
+        # Reuse ordinary row buffers; no mapped views leave the batch.
+        metrics_out = (np.empty(len(rules)), np.empty(len(rules))) if recorded is not None else None
+        for i in range(n_shuffles):
+            order = np.arange(len(labels))
+            if movable.size > 1:
+                order[movable] = rng.permutation(movable)
+            shuffled = cell_labels[order, :]
 
-        # Multiply the fixed tissue maps by the randomized labels to rebuild patches.
-        transactions = _transactions(shuffled, (centers, neighbors, membership, patch_sizes), settings)
-                                                
-        # Tally how many rules passed the statistical thresholds by pure chance.
-        survived += survives_shuffle(layout, transactions, settings)
+            # Multiply the fixed tissue maps by the randomized labels to rebuild patches.
+            transactions = _transactions(shuffled, (centers, neighbors, membership, patch_sizes), settings)
 
-        if i == 0 or (i + 1) % 100 == 0 or i == n_shuffles - 1:
-            logger.debug(f"{prefix}  shuffle {i + 1}/{n_shuffles}")
+            # Reuse the same measurements for testing and optional recording.
+            passed = survives_shuffle(layout, transactions, settings, metrics_out=metrics_out)
+            survived += passed
+            if recorded is not None:
+                recorded["lift"][i] = metrics_out[0]
+                recorded["conviction"][i] = metrics_out[1]
+                recorded["passed_mining_filters"][i] = passed
+
+            if i == 0 or (i + 1) % 100 == 0 or i == n_shuffles - 1:
+                logger.debug(f"{prefix}  shuffle {i + 1}/{n_shuffles}")
 
     elapsed = time.time() - started
     logger.info(f"{prefix}Shuffling took {int(elapsed // 60)}m {elapsed % 60:.1f}s" if elapsed >= 60 else f"{prefix}Shuffling took {elapsed:.2f}s")
@@ -304,9 +321,12 @@ def _supports(layout, transactions, settings):
     return measured[layout.ant_at], measured[layout.con_at], measured[layout.joint_at]
 
 
-def survives_shuffle(layout, transactions, settings):
+def survives_shuffle(layout, transactions, settings, *, metrics_out=None):
     """Which rules still pass their own thresholds here. Each judged by its own kind."""
     held = np.zeros(len(layout.usable))
+    if metrics_out is not None:
+        for values in metrics_out:
+            values[:] = np.nan
     # Nothing usable means nothing was measured, so nothing to read off.
     if transactions.size == 0 or not layout.usable.any():
         return held
@@ -319,11 +339,19 @@ def survives_shuffle(layout, transactions, settings):
     if not testable.any():
         return held
 
-    # Both judges run over every rule; each rule takes its own answer.
+    # Each rule takes its own judge's answer. Attraction-only settings may leave the
+    # avoidance thresholds unset, so avoidance is judged only when it was searched.
     measures = metrics(joint, ant_sup, con_sup)
-    held[testable] = np.where(layout.avoiding,
-                              avoids(settings, joint, ant_sup, con_sup, measures, n),
-                              attracts(settings, joint, ant_sup, con_sup, measures, n))[testable]
+    if metrics_out is not None:
+        metrics_out[0][testable] = measures[1][testable]
+        # A universal consequent gives undefined conviction (0/0).
+        defined_conviction = testable & (con_sup < 1)
+        metrics_out[1][defined_conviction] = measures[3][defined_conviction]
+    judged = attracts(settings, joint, ant_sup, con_sup, measures, n)
+    if settings.include_avoidance_rules:
+        judged = np.where(layout.avoiding,
+                          avoids(settings, joint, ant_sup, con_sup, measures, n), judged)
+    held[testable] = judged[testable]
     return held
 
 

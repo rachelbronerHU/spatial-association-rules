@@ -422,7 +422,7 @@ def test_resolution_check_includes_rules_from_relaxed_high_confidence_support(mo
     assert mined.iloc[0].support == pytest.approx(0.1)
     result = Result(mined, {}, [], np.array(["A", "B", "C", "D"]), settings)
 
-    def shuffling(rules, *args):
+    def shuffling(rules, *args, permutation_dir=None):
         assert len(rules) == 1
         return np.array([1 / 320])
 
@@ -466,6 +466,14 @@ def test_the_thresholds_that_make_a_p_value_mean_something_are_required():
 
     # Attraction alone needs no avoidance threshold.
     assert base(include_avoidance_rules=False, avoidance_max_lift=None)
+
+
+def test_attraction_only_rules_can_be_shuffled_without_avoidance_threshold():
+    coords, labels = grid_tissue()
+    result = mine(coords, labels, base(include_avoidance_rules=False, avoidance_max_lift=None))
+    assert not result.rules.empty
+    tested = result.add_p_values(n_shuffles=9, random_seed=0, calculate_fdr=False)
+    assert tested.p_value.notna().all()
 
 
 def test_unset_thresholds_do_not_filter():
