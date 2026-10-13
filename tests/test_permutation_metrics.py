@@ -13,7 +13,7 @@ from spatial_association_rules import Weighting, run_samples
 from spatial_association_rules.transactions import build_transactions
 from spatial_association_rules.validation.permutations import record_permutations
 from spatial_association_rules.validation.significance import seed_for
-from test_conditional import sample
+from test_conditional import direct_pass, sample
 from test_mining import base, grid_tissue
 
 
@@ -72,16 +72,30 @@ def test_individual_recording_matches_arithmetic_and_reconstructs_p_values(tmp_p
 @pytest.mark.parametrize("consequent", [False, True])
 @pytest.mark.parametrize("kind", ["attracts", "avoids"])
 def test_conditional_batches_keep_metrics_and_rule_ids_without_changing_results(
-        tmp_path, weighting, consequent, kind):
+        tmp_path, monkeypatch, weighting, consequent, kind):
     result, rules = sample(weighting, consequent=consequent, two_parents=not consequent)
     rules["kind"] = kind
     rules["rule_idx"] = np.arange(len(rules)) * 11 + 7
+    conditional = import_module("spatial_association_rules.validation.conditional")
+    original = conditional._rule_columns
+    layouts = []
+
+    def capture(rows, item_index):
+        layouts.append(rows.rule_idx.tolist())
+        return original(rows, item_index)
+
+    monkeypatch.setattr(conditional, "_rule_columns", capture)
     options = dict(n_shuffles=19, random_seed=7, max_individual_fdr=.05)
     expected, expected_comparisons = result.add_conditional_p_values(rules, **options)
+    batches = expected_comparisons[expected_comparisons.status == "tested"].fixed_types.nunique()
+    assert layouts[0] == rules.rule_idx.tolist()  # Observed gain metadata still uses both sides.
+    assert layouts[1:] == [[rules.rule_idx.iloc[-1]]] * batches
+    layouts.clear()
     actual, comparisons = result.add_conditional_p_values(
         rules, **options, permutation_dir=tmp_path / "permutations", sample_id="FOV")
     pd.testing.assert_frame_equal(actual, expected)
     pd.testing.assert_frame_equal(comparisons, expected_comparisons)
+    assert all(len(ids) == 2 for ids in layouts[1:])  # Recorded batches retain parent metrics.
     tested = comparisons[comparisons.status == "tested"]
     files = sorted((tmp_path / "permutations/sample_FOV").glob("conditional_*.npz"))
     assert len(files) == tested.fixed_types.nunique()
@@ -92,28 +106,25 @@ def test_conditional_batches_keep_metrics_and_rule_ids_without_changing_results(
             assert not group.empty
             ids = data["rule_idx"].tolist()
             assert set(ids) == set(group.rule_idx) | set(group.simpler_idx)
-            assert "passed_mining_filters" not in data and "gain" not in data and "simpler_idx" not in data
+            assert data["passed_mining_filters"].dtype == bool
+            assert "gain" not in data and "simpler_idx" not in data
             rows = rules.set_index("rule_idx").loc[ids]
             rng = np.random.default_rng(seed_for(7, json.dumps(fixed)))
             movable = np.flatnonzero(~np.isin(result.labels, fixed))
             direct = []
+            direct_passes = []
             for _ in range(19):
                 labels = result.labels.copy()
                 labels[movable] = result.labels[rng.permutation(movable)]
                 direct.append(measured(result, rows, labels))
+                direct_passes.append([direct_pass(result, row, labels) for row in rows.itertuples()])
             direct = np.array(direct)
             np.testing.assert_allclose(data["lift"], direct[:, :, 0], equal_nan=True)
             np.testing.assert_allclose(data["conviction"], direct[:, :, 1], equal_nan=True)
+            np.testing.assert_array_equal(data["passed_mining_filters"], direct_passes)
             for row in group.itertuples():
-                values = data[row.metric]
-                child, parent = values[:, ids.index(row.rule_idx)], values[:, ids.index(row.simpler_idx)]
-                numerator, denominator = (parent, child) if kind == "avoids" else (child, parent)
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    gains = numerator / denominator
-                gains[numerator == denominator] = 1
-                gains[np.isnan(gains)] = 0
-                exceeded = (gains >= row.observed_gain) | np.isclose(gains, row.observed_gain, rtol=1e-12, atol=0)
-                assert (exceeded.sum() + 1) / 20 == row.p_value
+                passed = data["passed_mining_filters"][:, ids.index(row.rule_idx)]
+                assert (passed.sum() + 1) / 20 == row.p_value
 
 
 @pytest.mark.parametrize("workers", [None, 2])

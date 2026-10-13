@@ -269,10 +269,24 @@ their relationships with the fixed types. It is not Webb's conditional independe
 null. Overlapping patches use the same shuffled physical cells; weighted supports
 are recomputed directly, without rounding them into Fisher counts.
 
-### Statistic and missing cases
+### Threshold counting and missing cases
 
-For each comparison, let `complex` and `simpler` be their lift values for a complex
-antecedent, or conviction values for a complex consequent. The gain statistic is:
+For every conditional shuffle, judge the complex rule with `survives_shuffle`, the
+same threshold checks used by the individual test. Attraction rules must meet the
+support policy and configured lift, confidence, leverage, conviction, and patch
+count thresholds. Avoidance rules use their own lift, leverage, patch count, and
+expected-meetings thresholds. The simpler rule determines which types stay fixed;
+its score never adds a condition to a shuffle's success.
+
+Count complex-rule passes and report `(count + 1)/(B + 1)`. No observed-strength or
+gain requirement applies. Rebuild transactions and reapply the crowding filter for
+every shuffle. An absent rule side fails the regular checks; no permutation is
+discarded or removed from the denominator.
+
+The comparison table retains the observed gain for reference and reconstruction of
+the former test. It does not affect the current p-value. For that metadata,
+let `complex` and `simpler` be their lift values for a complex antecedent, or
+conviction values for a complex consequent. The recorded gain is:
 
 - complex attraction: `complex / simpler`;
 - complex avoidance: `simpler / complex`.
@@ -280,19 +294,8 @@ antecedent, or conviction values for a complex consequent. The gain statistic is
 Equal zeros and equal infinities count as a ratio of 1. A finite positive number
 divided by zero is infinite; a finite number divided by infinity is zero. A missing
 side makes the metric undefined. A universal consequent makes conviction undefined.
-Observed undefined metrics leave that comparison untestable. Observed gains no
-greater than 1 get p = 1 without shuffling. The classification's minimum gain remains
-a separate effect requirement; it is not the permutation reference value.
-
-Rebuild transactions and reapply the crowding filter for the observed data and every
-shuffle. This can change which patches survive, even when parent-type cells stay
-fixed, so measure both the complex and simpler rule again. The comparison uses the
-same procedure throughout. An undefined shuffled gain counts as no improvement
-(score 0); no permutation is discarded or removed from the denominator.
-
-Count gains at least as large as the observed gain, including ties (relative tolerance
-1e-12 for floating-point arithmetic). The comparison p-value is `(count + 1)/(B + 1)`.
-An infinite observed gain is matched only by infinite shuffled gains.
+Undefined or non-improving observed gains do not prevent threshold testing. The
+classification's minimum gain remains a separate effect requirement.
 
 If a comparison has all relevant cell types fixed, missing cell types, or fewer than
 two distinct movable labels, it is untestable. Repeated types can cause this: freezing
@@ -307,10 +310,8 @@ table is their maximum. Thus every required
 comparison must have a small p-value. If any is untestable, retain the individual
 results but leave the combined value missing. No qualifying parent also means missing.
 
-For a fixed collection of valid component tests, this maximum is the
-[intersection-union test](https://pmc.ncbi.nlm.nih.gov/articles/PMC2752611/);
-independence between comparisons is not required. It does not provide correction
-across different complex rules.
+The maximum requires a low threshold-pass rate under every qualifying simpler rule's
+fixed-type set. It does not provide correction across different complex rules.
 
 By default, `conditional_fdr` applies Benjamini–Hochberg to the combined p-values, separately
 for each sample and rule size. Attraction and avoidance, complex antecedents and
@@ -334,15 +335,14 @@ Here the rules and qualifying parents were selected using the same data. This
 selection and dependence between rules still need validation before claiming FDR
 control for the full procedure. BH adjustment alone does not establish that control.
 
-The tests check permutation arithmetic and conservative rejection rates over a small,
-fully enumerated null with prespecified comparisons. This does not validate FDR after
-mining and parent selection, or the random-label null as a biological model.
+The tests check threshold-pass arithmetic over explicit permutations for binary and
+weighted patches and both rule kinds. This does not validate FDR after mining and
+parent selection, or the random-label null as a biological model.
 
 ### Work and reproducibility
 
 `Result.conditional_test_plan` lists comparisons without building shuffled tissues.
-Its `attrs["shuffle_batches"]` counts distinct usable fixed-type sets: an upper bound
-because observed non-improvements and undefined metrics can remove work later.
+Its `attrs["shuffle_batches"]` counts distinct usable fixed-type sets.
 Each batch shares rebuilt tissues among all its comparisons. Geometry is built once,
 and supports are measured only for the rules used by that batch. The actual counts
 are recorded in `rules.attrs["conditional_test_summary"]` and logged.
@@ -363,16 +363,16 @@ and simpler rules; the existing comparisons table supplies the pairs. See the
 
 Arrays use Python's public `mmap` API with temporary files, allowing the operating
 system to reclaim their pages under memory pressure. Buffer space per worker is
-`shuffles × rules × 17` bytes for individual tests and × 16 for conditional tests.
+`shuffles × rules × 17` bytes for both test types, including threshold-pass flags.
 Python chooses the temporary directory, respecting `TMPDIR`, `TEMP`, and `TMP`, so
 buffers can use local disk while final archives go to the chosen output folder.
 Mapped pages still count toward resident memory, including job memory limits; this
 approach does not guarantee lower peak memory usage or prevent out-of-memory failures.
 A temporary folder backed by RAM does not offer the same disk-backed reclaim.
 
-Individual tests reuse two ordinary row buffers, then copy each row into the mapped
+Both test types reuse two ordinary row buffers, then copy each row into the mapped
 arrays. This prevents the calculation from retaining views into memory that has been
-unmapped. Conditional tests already produce ordinary arrays and copy their values.
+unmapped.
 Every row is filled as it is calculated, avoiding an initial write over every mapped
 page. The mapped arrays are valid only inside the recording context. On exit, their
 references are cleared, mappings are closed, and temporary files are removed.

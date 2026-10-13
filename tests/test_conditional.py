@@ -84,6 +84,37 @@ def enumerate_four_shuffles(monkeypatch):
     monkeypatch.setattr(conditional.np.random, "default_rng", generator)
 
 
+def direct_pass(result, row, labels):
+    """Judge regular thresholds using scalar supports from patch dictionaries."""
+    transactions, _ = build_transactions(result.patches, labels, result.settings)
+    if not transactions:
+        return False
+    n = len(transactions)
+    def support(items):
+        return sum(min(t.get(item, 0) for item in items) for t in transactions) / n
+    ant, con = support(row.antecedents), support(row.consequents)
+    if ant <= 0 or con <= 0:
+        return False
+    joint = support(row.antecedents + row.consequents)
+    confidence, lift, leverage = joint / ant, joint / (ant * con), joint - ant * con
+    settings = result.settings
+    if row.kind == "avoids":
+        return (lift < 1 and lift <= settings.avoidance_max_lift
+                and ant * n >= settings.min_patches
+                and ant * con * n >= settings.avoidance_min_expected_meetings
+                and (settings.avoidance_max_leverage is None
+                     or leverage <= settings.avoidance_max_leverage))
+    conviction = (1 - con) / (1 - confidence) if confidence < 1 else np.inf
+    needed = settings.min_support
+    if settings.strong_confidence is not None and confidence >= settings.strong_confidence:
+        needed = settings.min_support_when_strong
+    return (lift >= 1 and lift >= settings.min_lift
+            and joint >= max(needed, settings.min_patches / n)
+            and all(limit is None or value >= limit for value, limit in (
+                (confidence, settings.min_confidence), (leverage, settings.min_leverage),
+                (conviction, settings.min_conviction))))
+
+
 def test_one_sample_workflow_from_p_values_to_classification():
     # Two known rules make every stage easy to inspect in a debugger.
     result, rules = sample()
@@ -126,13 +157,12 @@ def test_p_value_matches_explicit_patch_arithmetic(monkeypatch, weighting, conse
             result.patches[-4:] = [patch(10, [5, 8], [1, 1]),
                                    patch(11, [6], [1]), patch(12, [7], [1]), patch(13, [9], [1])]
     observed = direct_score(result, rules, result.labels)
-    shuffled_scores = []
+    passed = []
     for shift in range(4):
         shuffled = result.labels.copy()
         shuffled[6:10] = result.labels[np.roll(np.arange(6, 10), shift)]
-        shuffled_scores.append(direct_score(result, rules, shuffled))
-    expected = (1 + sum(score >= observed or np.isclose(score, observed)
-                        for score in shuffled_scores)) / 5 if observed > 1 else 1.0
+        passed.append(direct_pass(result, rules.iloc[-1], shuffled))
+    expected = (1 + sum(passed)) / 5
     enumerate_four_shuffles(monkeypatch)
     tested, comparisons = result.add_conditional_p_values(rules, n_shuffles=4, random_seed=10)
     assert tested.conditional_p_value.iloc[-1] == pytest.approx(expected)
@@ -142,7 +172,7 @@ def test_p_value_matches_explicit_patch_arithmetic(monkeypatch, weighting, conse
 
 
 @pytest.mark.parametrize("weighting", [Weighting.BINARY, Weighting.WEIGHTED])
-def test_fixed_comparison_is_conservative_over_its_entire_small_null(monkeypatch, weighting):
+def test_fixed_comparison_counts_threshold_passes_regardless_of_observed_gain(monkeypatch, weighting):
     p_values = []
     for b_position in range(6, 10):
         result, rules = sample(weighting)
@@ -150,8 +180,41 @@ def test_fixed_comparison_is_conservative_over_its_entire_small_null(monkeypatch
         enumerate_four_shuffles(monkeypatch)
         tested, _ = result.add_conditional_p_values(rules, n_shuffles=4)
         p_values.append(tested.conditional_p_value.iloc[-1])
-    for cutoff in [0.05, 0.2, 0.4, 0.6, 0.8]:
-        assert np.mean(np.array(p_values) <= cutoff) <= cutoff
+    # The entire null and thresholds are the same, regardless of the observed B location.
+    assert p_values == pytest.approx([0.6] * 4)
+
+
+@pytest.mark.parametrize("changes,expected", [
+    ({"min_lift": 3}, 0.4),
+    ({"min_support": 0.3}, 0.2),
+    ({"min_patches": 2}, 0.2),
+    ({"min_confidence": 0.9}, 0.4),
+    ({"min_leverage": 0.08}, 0.4),
+    ({"min_conviction": 3}, 0.4),
+    ({"min_support": 0.3, "strong_confidence": 0.9,
+      "min_support_when_strong": 0.1}, 0.4),
+])
+def test_conditional_uses_every_regular_attraction_threshold(monkeypatch, changes, expected):
+    result, rules = sample(Weighting.WEIGHTED)
+    result.settings = result.settings.replace(**changes)
+    enumerate_four_shuffles(monkeypatch)
+    tested, _ = result.add_conditional_p_values(rules, n_shuffles=4)
+    assert tested.conditional_p_value.iloc[-1] == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("changes,expected", [
+    ({"avoidance_min_expected_meetings": 0.01}, 0.6),
+    ({"avoidance_min_expected_meetings": 0.01, "min_patches": 2}, 0.2),
+    ({"avoidance_min_expected_meetings": 0.01, "avoidance_max_leverage": -0.1}, 0.2),
+    ({"avoidance_min_expected_meetings": 1}, 0.2),
+])
+def test_conditional_uses_regular_avoidance_thresholds(monkeypatch, changes, expected):
+    result, rules = sample(Weighting.WEIGHTED)
+    rules.loc[rules.index[-1], "kind"] = "avoids"
+    result.settings = result.settings.replace(**changes)
+    enumerate_four_shuffles(monkeypatch)
+    tested, _ = result.add_conditional_p_values(rules, n_shuffles=4)
+    assert tested.conditional_p_value.iloc[-1] == pytest.approx(expected)
 
 
 def test_all_parent_cells_and_configured_types_stay_fixed(monkeypatch):
@@ -283,12 +346,12 @@ def test_crowding_filter_is_reapplied_for_observed_and_shuffled_tissues(monkeypa
     result.patches.append(patch(7, [8], [0.7]))  # D,D is dropped; B,D is retained.
     enumerate_four_shuffles(monkeypatch)
     observed = direct_score(result, rules, result.labels)
-    scores = []
+    passed = []
     for shift in range(4):
         shuffled = result.labels.copy()
         shuffled[6:10] = result.labels[np.roll(np.arange(6, 10), shift)]
-        scores.append(direct_score(result, rules, shuffled))
-    expected = (1 + sum(score >= observed for score in scores)) / 5
+        passed.append(direct_pass(result, rules.iloc[-1], shuffled))
+    expected = (1 + sum(passed)) / 5
     tested, _ = result.add_conditional_p_values(rules, n_shuffles=4)
     assert tested.conditional_p_value.iloc[-1] == pytest.approx(expected)
 
@@ -341,13 +404,14 @@ def test_missing_fdr_column_does_not_silently_enable_all_parents():
         result.conditional_test_plan(rules.drop(columns="individual_fdr"))
 
 
-def test_undefined_observed_metric_is_untestable():
+def test_undefined_observed_gain_does_not_prevent_threshold_testing():
     result, rules = sample(consequent=True)
     result.labels[[6, 8]] = result.labels[[8, 6]]  # B and C never co-occur anywhere.
     tested, comparisons = result.add_conditional_p_values(rules, n_shuffles=9)
-    assert tested.conditional_status.iloc[-1] == "untestable"
-    assert comparisons.status.tolist() == ["undefined_metric"]
-    assert pd.isna(tested.conditional_p_value.iloc[-1])
+    assert tested.conditional_status.iloc[-1] == "tested"
+    assert comparisons.status.tolist() == ["tested"]
+    assert pd.isna(comparisons.observed_gain.iloc[0])
+    assert np.isfinite(tested.conditional_p_value.iloc[-1])
 
 
 def test_original_fixed_label_configuration_is_recorded_and_inherited():

@@ -13,6 +13,7 @@ from .false_discovery import fdr_by_size, fdr_families
 from .permutations import record_permutations
 from .significance import (
     _adjacency, _encode_labels, _held_fixed, _rule_columns, _supports, _transactions, seed_for,
+    survives_shuffle,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,7 +73,10 @@ def conditional_test_plan(rules, labels, max_individual_fdr, labels_kept_fixed=(
 def conditional_p_values(rules, patches, labels, settings, *, n_shuffles,
                          max_individual_fdr, random_seed=None, labels_kept_fixed=(), sample_id="",
                          calculate_fdr=True, permutation_dir=None):
-    """Add comparison p-values, their maximum per rule, and optional FDR.
+    """Count complex rules passing regular thresholds with simpler types fixed.
+
+    Add comparison p-values, their maximum per rule, and optional FDR.
+    Observed gain is recorded for reference only; it never gates or scores a test.
 
     These test a restricted random-label null, not Webb's conditional independence.
     Parents are selected from the same data, so FDR is not proven controlled.
@@ -95,10 +99,6 @@ def conditional_p_values(rules, patches, labels, settings, *, n_shuffles,
                             _transactions(cell_labels, adjacency, settings), settings)
         observed_scores = _scores(observed, plan, np.arange(len(rules)))
         plan.loc[ready, "observed_gain"] = observed_scores[ready]
-        plan.loc[ready & np.isnan(observed_scores), "status"] = "undefined_metric"
-        no_gain = ready & (observed_scores <= 1)
-        plan.loc[no_gain, "status"] = "no_improvement"
-        plan.loc[no_gain, "p_value"] = 1.0
         groups = plan[plan.status == "ready"].groupby("fixed_types", sort=True)
         batches = groups.ngroups
         prefix = f"[{sample_id}] " if sample_id else ""
@@ -107,27 +107,28 @@ def conditional_p_values(rules, patches, labels, settings, *, n_shuffles,
 
         for batch, (fixed, group) in enumerate(groups, 1):
             movable = np.flatnonzero(~np.isin(labels, fixed))
-            positions = np.union1d(group.rule_pos, group.simpler_pos).astype(int)
+            positions = (np.union1d(group.rule_pos, group.simpler_pos)
+                         if permutation_dir is not None else np.unique(group.rule_pos)).astype(int)
             layout = _rule_columns(rules.iloc[positions], item_index)
             rng = np.random.default_rng(seed_for(random_seed, json.dumps(fixed)))
-            exceeded = np.zeros(len(group), dtype=int)
-            scores = observed_scores[group.index]
+            survived = np.zeros(len(group), dtype=int)
+            children = np.searchsorted(positions, group.rule_pos.to_numpy(dtype=int))
             rule_idx = ids[positions] if permutation_dir is not None else None
+            metrics_out = ((np.empty(len(positions)), np.empty(len(positions)))
+                           if permutation_dir is not None else None)
             with record_permutations(permutation_dir, n_shuffles, rule_idx, sample_id=sample_id,
                                      test="conditional", fixed_types=fixed, batch=batch) as recorded:
                 for i in range(n_shuffles):
                     order = np.arange(len(labels))
                     order[movable] = rng.permutation(movable)
                     transactions = _transactions(cell_labels[order], adjacency, settings)
-                    values = _measure(layout, transactions, settings)
+                    passed = survives_shuffle(layout, transactions, settings, metrics_out=metrics_out)
                     if recorded is not None:
-                        recorded["lift"][i] = values[:, 0]
-                        recorded["conviction"][i] = values[:, 1]
-                    shuffled = _scores(values, group, positions)
-                    # An absent side cannot show improvement. Never discard a permutation.
-                    shuffled = np.where(np.isnan(shuffled), 0.0, shuffled)
-                    exceeded += (shuffled >= scores) | np.isclose(shuffled, scores, rtol=1e-12, atol=0)
-            plan.loc[group.index, "p_value"] = (exceeded + 1) / (n_shuffles + 1)
+                        recorded["lift"][i] = metrics_out[0]
+                        recorded["conviction"][i] = metrics_out[1]
+                        recorded["passed_mining_filters"][i] = passed
+                    survived += passed[children].astype(int)
+            plan.loc[group.index, "p_value"] = (survived + 1) / (n_shuffles + 1)
             plan.loc[group.index, "status"] = "tested"
             logger.debug(f"{prefix}Conditional batch {batch}/{batches}: fixed {fixed}")
 

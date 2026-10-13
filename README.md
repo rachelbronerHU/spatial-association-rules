@@ -206,8 +206,8 @@ If `labels_kept_fixed` leaves too few cells free to shuffle, testing raises an e
 ### Optional conditional tests
 
 Keep each significant simpler rule's cell types fixed and shuffle the remaining labels.
-This asks whether the observed lift or conviction gain is unusual under that restricted
-shuffle. It freezes **all cells** of those types, including cells outside joint patches,
+This asks how often the complex rule passes its regular mining thresholds under that
+restricted shuffle. It freezes **all cells** of those types, including cells outside joint patches,
 plus the fixed labels recorded by `add_p_values`.
 
 ```python
@@ -224,11 +224,11 @@ rules = classify_rules(conditional, max_individual_fdr=0.05)
 Rules sharing the same fixed types share a batch. With 20 batches and 1,000 shuffles,
 plan for up to 20,000 extra tissue rebuilds. The plan itself runs no shuffles.
 
-For each comparison, the test uses lift gain for complex antecedents and conviction
-gain for complex consequents, in the complex rule's direction. It counts shuffled
-gains at least as large as the observed gain. The p-value is `(count + 1) / (shuffles + 1)`.
-The combined value is the **largest** comparison p-value. A rule with no observed
-improvement gets 1 for that comparison.
+For each comparison, count shuffles in which the complex rule passes the same
+threshold checks as `add_p_values`, judged by its own attraction or avoidance kind.
+There is no gain or observed-strength requirement. The p-value is
+`(count + 1) / (shuffles + 1)`. The combined value is the **largest** comparison p-value.
+The metric and observed gain remain in the comparisons table for reference only.
 
 `comparisons` is a separate table, one row per significant simpler rule. It shows
 the rule, simpler rule, fixed types, metric, observed gain, p-value, and status.
@@ -240,8 +240,8 @@ comparisons with `sample_id`; join them to `report.rules()` on
 Set `calculate_fdr=False` in `add_conditional_p_values` to keep the comparison and
 combined p-values without calculating or returning `conditional_fdr`.
 
-Pairwise and mixed rules are not tested. No significant simpler rule, undefined
-metrics, all relevant types fixed, or no remaining labels that can change means a
+Pairwise and mixed rules are not tested. No significant simpler rule, missing cell
+types, all relevant types fixed, or no remaining labels that can change means a
 missing conditional p-value. `comparisons` gives the reason. Partial results
 are retained, but an untestable comparison leaves the combined value missing.
 
@@ -355,14 +355,16 @@ Each `.npz` contains:
 |---|---|
 | `rule_idx` | rule IDs identifying metric columns, matching the returned rules |
 | `lift`, `conviction` | float64 arrays with shape `(permutations, rules)` |
-| `passed_mining_filters` | boolean array with the same shape, individual tests only |
+| `passed_mining_filters` | boolean array with the same shape, for both test types |
 | `sample_id`, `test` | string scalars identifying the sample and test |
 | `fixed_types` | cell types held fixed in this batch |
 
 Rows identify permutations in execution order. Undefined metrics are `NaN`; infinite
 conviction is retained. Conditional archives include both complex and simpler rules
 measured in that batch. Use the existing comparisons table and `fixed_types` to find
-rule pairs, then calculate gains from their metrics in the same permutation.
+rule pairs, then calculate gains from their metrics in the same permutation to
+reconstruct the former observed-gain test. Threshold-pass flags reconstruct the
+current conditional p-values directly from each complex rule's column.
 No duplicate simpler-rule IDs or gain arrays are stored.
 
 ```python
