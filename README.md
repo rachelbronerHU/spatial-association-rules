@@ -130,6 +130,8 @@ The optional conditional test adds the last three columns below.
 | `sample_id` | which sample, from `run_samples` only |
 | `conditional_p_value` | largest p-value across the conditional comparisons; missing if any required comparison is untestable |
 | `conditional_fdr` | optional corrected conditional p-value within this sample and rule size; missing when the conditional p-value is missing or too few shuffles can meet `max_individual_fdr` |
+| `conditional_gain_p_value` | largest gain p-value across the conditional comparisons; missing if any is missing |
+| `conditional_gain_fdr` | optional corrected gain p-value, as `conditional_fdr` |
 | `conditional_status` | `tested`, `no_significant_simpler`, `not_applicable`, or `untestable` |
 
 ## Pipeline
@@ -228,17 +230,20 @@ For each comparison, count shuffles in which the complex rule passes the same
 threshold checks as `add_p_values`, judged by its own attraction or avoidance kind.
 There is no gain or observed-strength requirement. The p-value is
 `(count + 1) / (shuffles + 1)`. The combined value is the **largest** comparison p-value.
-The metric and observed gain remain in the comparisons table for reference only.
+A second p-value, `gain_p_value`, counts shuffles whose gain over the simpler rule is
+at least the observed gain. It is missing when the observed gain is undefined.
+It is combined and corrected the same way, as `conditional_gain_p_value` and
+`conditional_gain_fdr`.
 
 `comparisons` is a separate table, one row per significant simpler rule. It shows
-the rule, simpler rule, fixed types, metric, observed gain, p-value, and status.
+the rule, simpler rule, fixed types, metric, observed gain, both p-values, and status.
 `rule_idx` and `simpler_idx` link each comparison to rows of `conditional` by their
 `rule_idx`. In multi-sample runs, `report.comparisons()` combines every sample's
 comparisons with `sample_id`; join them to `report.rules()` on
 `["sample_id", "rule_idx"]`.
 
 Set `calculate_fdr=False` in `add_conditional_p_values` to keep the comparison and
-combined p-values without calculating or returning `conditional_fdr`.
+combined p-values without calculating or returning either FDR column.
 
 Pairwise and mixed rules are not tested. No significant simpler rule, missing cell
 types, all relevant types fixed, or no remaining labels that can change means a
@@ -362,9 +367,8 @@ Each `.npz` contains:
 Rows identify permutations in execution order. Undefined metrics are `NaN`; infinite
 conviction is retained. Conditional archives include both complex and simpler rules
 measured in that batch. Use the existing comparisons table and `fixed_types` to find
-rule pairs, then calculate gains from their metrics in the same permutation to
-reconstruct the former observed-gain test. Threshold-pass flags reconstruct the
-current conditional p-values directly from each complex rule's column.
+rule pairs, then calculate gains from their metrics in the same permutation.
+Threshold-pass flags reconstruct the threshold p-values from each complex rule's column.
 No duplicate simpler-rule IDs or gain arrays are stored.
 
 ```python

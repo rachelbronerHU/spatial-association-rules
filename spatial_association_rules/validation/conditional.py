@@ -88,6 +88,7 @@ def conditional_p_values(rules, patches, labels, settings, *, n_shuffles,
     labels = np.asarray(labels, dtype=str)
     plan = conditional_test_plan(rules, labels, max_individual_fdr, labels_kept_fixed)
     plan["p_value"] = np.nan
+    plan["gain_p_value"] = np.nan
     plan["observed_gain"] = np.nan
     ids = rules["rule_idx"].to_numpy() if "rule_idx" in rules else np.arange(len(rules))
     batches = 0
@@ -107,15 +108,15 @@ def conditional_p_values(rules, patches, labels, settings, *, n_shuffles,
 
         for batch, (fixed, group) in enumerate(groups, 1):
             movable = np.flatnonzero(~np.isin(labels, fixed))
-            positions = (np.union1d(group.rule_pos, group.simpler_pos)
-                         if permutation_dir is not None else np.unique(group.rule_pos)).astype(int)
+            positions = np.union1d(group.rule_pos, group.simpler_pos).astype(int)
             layout = _rule_columns(rules.iloc[positions], item_index)
             rng = np.random.default_rng(seed_for(random_seed, json.dumps(fixed)))
             survived = np.zeros(len(group), dtype=int)
+            gained = np.zeros(len(group), dtype=int)
+            observed_gain = observed_scores[group.index]
             children = np.searchsorted(positions, group.rule_pos.to_numpy(dtype=int))
             rule_idx = ids[positions] if permutation_dir is not None else None
-            metrics_out = ((np.empty(len(positions)), np.empty(len(positions)))
-                           if permutation_dir is not None else None)
+            metrics_out = (np.empty(len(positions)), np.empty(len(positions)))
             with record_permutations(permutation_dir, n_shuffles, rule_idx, sample_id=sample_id,
                                      test="conditional", fixed_types=fixed, batch=batch) as recorded:
                 for i in range(n_shuffles):
@@ -128,16 +129,25 @@ def conditional_p_values(rules, patches, labels, settings, *, n_shuffles,
                         recorded["conviction"][i] = metrics_out[1]
                         recorded["passed_mining_filters"][i] = passed
                     survived += passed[children].astype(int)
+                    # An absent side gives NaN, which never counts. Never discard a permutation.
+                    gain = _scores(np.column_stack(metrics_out), group, positions)
+                    gained += (gain >= observed_gain) | np.isclose(gain, observed_gain, rtol=1e-12, atol=0)
             plan.loc[group.index, "p_value"] = (survived + 1) / (n_shuffles + 1)
+            plan.loc[group.index, "gain_p_value"] = np.where(
+                np.isnan(observed_gain), np.nan, (gained + 1) / (n_shuffles + 1))
             plan.loc[group.index, "status"] = "tested"
             logger.debug(f"{prefix}Conditional batch {batch}/{batches}: fixed {fixed}")
 
     result = _attach_results(rules, plan)
+    fdr_columns = {"conditional_p_value": "conditional_fdr",
+                   "conditional_gain_p_value": "conditional_gain_fdr"}
     if calculate_fdr:
-        result["conditional_fdr"] = _conditional_fdr(result, labels, settings, n_shuffles=n_shuffles,
-                                                     max_fdr=max_individual_fdr, sample_id=sample_id)
+        for p_column, fdr_column in fdr_columns.items():
+            result[fdr_column] = _conditional_fdr(result, p_column, fdr_column, labels, settings,
+                                                  n_shuffles=n_shuffles, max_fdr=max_individual_fdr,
+                                                  sample_id=sample_id)
     else:
-        result.drop(columns="conditional_fdr", errors="ignore", inplace=True)
+        result.drop(columns=list(fdr_columns.values()), errors="ignore", inplace=True)
     result.attrs["conditional_test_summary"] = dict(
         comparisons=len(plan), shuffle_batches=batches, n_shuffles=n_shuffles,
         shuffled_tissues=batches * n_shuffles,
@@ -155,14 +165,15 @@ def check_shuffle_count(value, name):
         raise ValueError(f"{name} must be a positive integer")
 
 
-def _conditional_fdr(rules, labels, settings, *, n_shuffles, max_fdr, sample_id=""):
+def _conditional_fdr(rules, p_column, fdr_column, labels, settings, *, n_shuffles, max_fdr,
+                     sample_id=""):
     """Correct each size over all candidates, as individual_fdr does; untested rows stay NaN.
 
     Mixed rules are candidates too, although never tested, so they count as p=1.
     """
-    p_values = rules["conditional_p_value"]
+    p_values = rules[p_column]
     families = fdr_families(rules[p_values.notna()], labels, settings, n_shuffles=n_shuffles,
-                            max_fdr=max_fdr, column="conditional_fdr", sample_id=sample_id)
+                            max_fdr=max_fdr, column=fdr_column, sample_id=sample_id)
     return fdr_by_size(rules, p_values, families)
 
 
@@ -198,10 +209,10 @@ def _scores(values, comparisons, positions):
 def _attach_results(rules, plan):
     result = rules.copy()
     by_rule = {pos: group for pos, group in plan.groupby("rule_pos")}
-    p_values, statuses = [], []
+    p_values, gain_p_values, statuses = [], [], []
     for pos, row in enumerate(rules.itertuples(index=False)):
         comparisons = by_rule.get(pos)
-        p_value = np.nan
+        p_value = gain_p_value = np.nan
         if _rule_type(len(row.antecedents), len(row.consequents)) in ("pairwise", "complex-mixed"):
             status = "not_applicable"
         elif comparisons is None:
@@ -210,9 +221,12 @@ def _attach_results(rules, plan):
             status = "untestable"
         else:
             p_value = comparisons["p_value"].max()
+            gain_p_value = comparisons["gain_p_value"].max(skipna=False)
             status = "tested"
         p_values.append(p_value)
+        gain_p_values.append(gain_p_value)
         statuses.append(status)
     result["conditional_p_value"] = pd.Series(p_values, index=result.index, dtype=float)
+    result["conditional_gain_p_value"] = pd.Series(gain_p_values, index=result.index, dtype=float)
     result["conditional_status"] = pd.Series(statuses, index=result.index, dtype=object)
     return result

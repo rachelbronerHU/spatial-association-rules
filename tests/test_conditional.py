@@ -157,15 +157,18 @@ def test_p_value_matches_explicit_patch_arithmetic(monkeypatch, weighting, conse
             result.patches[-4:] = [patch(10, [5, 8], [1, 1]),
                                    patch(11, [6], [1]), patch(12, [7], [1]), patch(13, [9], [1])]
     observed = direct_score(result, rules, result.labels)
-    passed = []
+    passed, gains = [], []
     for shift in range(4):
         shuffled = result.labels.copy()
         shuffled[6:10] = result.labels[np.roll(np.arange(6, 10), shift)]
         passed.append(direct_pass(result, rules.iloc[-1], shuffled))
+        gains.append(direct_score(result, rules, shuffled))
     expected = (1 + sum(passed)) / 5
+    expected_gain = (1 + sum(gain >= observed or np.isclose(gain, observed) for gain in gains)) / 5
     enumerate_four_shuffles(monkeypatch)
     tested, comparisons = result.add_conditional_p_values(rules, n_shuffles=4, random_seed=10)
     assert tested.conditional_p_value.iloc[-1] == pytest.approx(expected)
+    assert tested.conditional_gain_p_value.iloc[-1] == pytest.approx(expected_gain)
     assert comparisons.observed_gain.iloc[0] == pytest.approx(observed)
     assert tested.conditional_status.iloc[-1] == "tested"
     pd.testing.assert_frame_equal(tested[rules.columns], rules)
@@ -252,9 +255,11 @@ def test_two_parents_use_separate_batches_and_combine_with_max():
     assert len(details) == 2
     assert details.status.tolist() == ["tested", "tested"]
     assert tested.conditional_p_value.iloc[-1] == details.p_value.max()
+    assert tested.conditional_gain_p_value.iloc[-1] == details.gain_p_value.max()
     # Four labels give 4 * C(4, 2) * 3 splits * 2 kinds = 144 candidates.
     assert tested.conditional_fdr.iloc[-1] == min(1, 144 * tested.conditional_p_value.iloc[-1])
     assert tested.conditional_fdr.iloc[:-1].isna().all()
+    assert tested.conditional_gain_fdr.iloc[-1] == min(1, 144 * tested.conditional_gain_p_value.iloc[-1])
     assert tested.attrs["conditional_test_summary"]["shuffled_tissues"] == 78
 
 
@@ -412,6 +417,7 @@ def test_undefined_observed_gain_does_not_prevent_threshold_testing():
     assert comparisons.status.tolist() == ["tested"]
     assert pd.isna(comparisons.observed_gain.iloc[0])
     assert np.isfinite(tested.conditional_p_value.iloc[-1])
+    assert pd.isna(tested.conditional_gain_p_value.iloc[-1])
 
 
 def test_original_fixed_label_configuration_is_recorded_and_inherited():
@@ -460,7 +466,8 @@ def test_conditional_fdr_groups_sizes_and_pads_all_candidates(one_sided, four_it
     rules["conditional_p_value"] = [0.0001, 0.0004, 0.03, 0.0002, np.nan, np.nan]
     # BH ranks the three available 3-item values together, with 144 total candidates.
     expected = [0.0144, 0.0288, 1, four_item_candidates * 0.0002, np.nan, np.nan]
-    actual = conditional._conditional_fdr(rules, result.labels, settings, n_shuffles=1, max_fdr=None)
+    actual = conditional._conditional_fdr(rules, "conditional_p_value", "conditional_fdr",
+                                          result.labels, settings, n_shuffles=1, max_fdr=None)
     np.testing.assert_allclose(actual, expected, equal_nan=True)
 
 
@@ -469,7 +476,8 @@ def test_conditional_fdr_counts_only_enabled_kinds():
     settings = result.settings.replace(include_avoidance_rules=False)
     rules["conditional_p_value"] = [np.nan, 0.0001]
     # Attraction only halves the 3-item family from 144 to 72 candidates.
-    actual = conditional._conditional_fdr(rules, result.labels, settings, n_shuffles=1, max_fdr=None)
+    actual = conditional._conditional_fdr(rules, "conditional_p_value", "conditional_fdr",
+                                          result.labels, settings, n_shuffles=1, max_fdr=None)
     np.testing.assert_allclose(actual, [np.nan, 0.0072], equal_nan=True)
 
 
@@ -488,7 +496,7 @@ def test_conditional_p_values_can_be_requested_without_fdr(caplog):
     tested, _ = result.add_conditional_p_values(rules, n_shuffles=9, random_seed=4,
                                                 calculate_fdr=False)
     assert np.isfinite(tested.conditional_p_value.iloc[1])
-    assert "conditional_fdr" not in tested
+    assert "conditional_fdr" not in tested and "conditional_gain_fdr" not in tested
     assert "Insufficient permutation resolution" not in caplog.text
 
     raw = rules.drop(columns="individual_fdr")
@@ -500,8 +508,8 @@ def test_more_rules_than_candidates_warns_instead_of_raising(caplog):
     result, rules = sample()
     rules = pd.concat([rules.iloc[[1]]] * 145)
     rules["conditional_p_value"] = 0.01
-    actual = conditional._conditional_fdr(rules, result.labels, result.settings,
-                                          n_shuffles=1, max_fdr=None)
+    actual = conditional._conditional_fdr(rules, "conditional_p_value", "conditional_fdr",
+                                          result.labels, result.settings, n_shuffles=1, max_fdr=None)
     assert "145 3-item rules but only 144 candidates" in caplog.text
     assert np.isnan(actual).all()
 

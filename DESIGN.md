@@ -283,10 +283,12 @@ gain requirement applies. Rebuild transactions and reapply the crowding filter f
 every shuffle. An absent rule side fails the regular checks; no permutation is
 discarded or removed from the denominator.
 
-The comparison table retains the observed gain for reference and reconstruction of
-the former test. It does not affect the current p-value. For that metadata,
-let `complex` and `simpler` be their lift values for a complex antecedent, or
-conviction values for a complex consequent. The recorded gain is:
+A second, separate p-value, `gain_p_value`, uses the gain. It counts shuffles whose
+gain is at least the observed gain, ties included (relative tolerance 1e-12), and
+reports `(count + 1)/(B + 1)`. An undefined shuffled gain never counts; an undefined
+observed gain leaves `gain_p_value` missing. Neither p-value affects the other.
+Let `complex` and `simpler` be their lift values for a complex antecedent, or
+conviction values for a complex consequent. The gain is:
 
 - complex attraction: `complex / simpler`;
 - complex avoidance: `simpler / complex`.
@@ -306,7 +308,8 @@ Paneth and Epithelial also freezes every type in
 
 The separate `comparisons` table stores the parent, metric, observed gain, fixed
 types, status, and p-value for every comparison. `conditional_p_value` in the rules
-table is their maximum. Thus every required
+table is their maximum, and `conditional_gain_p_value` is the maximum gain p-value.
+Thus every required
 comparison must have a small p-value. If any is untestable, retain the individual
 results but leave the combined value missing. No qualifying parent also means missing.
 
@@ -321,7 +324,8 @@ as for `individual_fdr`, including allowed mixed candidates when enabled. Unretu
 or untested candidates count as p=1 for correction; missing conditional p-values
 and their adjusted values stay missing in the output. No extra shuffles are needed.
 Set `calculate_fdr=False` for the conditional test to skip this correction while
-keeping the comparison p-values. The parent selection still requires the original
+keeping the comparison p-values. `conditional_gain_fdr` is corrected the same way.
+The parent selection still requires the original
 `individual_fdr` column and a cutoff.
 
 The parent cutoff `max_individual_fdr` selects simpler rules and is reused for the
@@ -335,7 +339,7 @@ Here the rules and qualifying parents were selected using the same data. This
 selection and dependence between rules still need validation before claiming FDR
 control for the full procedure. BH adjustment alone does not establish that control.
 
-The tests check threshold-pass arithmetic over explicit permutations for binary and
+The tests check threshold-pass and gain arithmetic over explicit permutations for binary and
 weighted patches and both rule kinds. This does not validate FDR after mining and
 parent selection, or the random-label null as a biological model.
 

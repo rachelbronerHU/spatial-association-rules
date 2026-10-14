@@ -89,7 +89,8 @@ def test_conditional_batches_keep_metrics_and_rule_ids_without_changing_results(
     expected, expected_comparisons = result.add_conditional_p_values(rules, **options)
     batches = expected_comparisons[expected_comparisons.status == "tested"].fixed_types.nunique()
     assert layouts[0] == rules.rule_idx.tolist()  # Observed gain metadata still uses both sides.
-    assert layouts[1:] == [[rules.rule_idx.iloc[-1]]] * batches
+    assert len(layouts) == batches + 1
+    assert all(len(ids) == 2 for ids in layouts[1:])  # Gain needs both sides in every batch.
     layouts.clear()
     actual, comparisons = result.add_conditional_p_values(
         rules, **options, permutation_dir=tmp_path / "permutations", sample_id="FOV")
