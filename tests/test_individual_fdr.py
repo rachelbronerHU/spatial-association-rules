@@ -104,11 +104,9 @@ def test_minimum_shuffle_budget_includes_the_equality_boundary():
 
 
 @pytest.mark.parametrize("shuffles,cutoff,blocked", [
-    (178, 0.05, {2, 3}), (179, 0.05, {3}), (199, 0.05, {3}),
-    (1079, 0.05, set()), (199, None, set()), (199, 0.5, set()),
-    (0, 0.05, {2, 3}), (0, 1, set()),
+    (178, 0.05, True), (179, 0.05, False), (199, None, False), (0, 0.05, True), (0, 1, False),
 ])
-def test_resolution_check_precedes_shuffles_and_only_skips_impossible_sizes(
+def test_resolution_check_precedes_shuffles_and_only_pairs_are_shuffled(
         monkeypatch, caplog, shuffles, cutoff, blocked):
     settings = Settings(weighting=Weighting.BINARY, method=Method.CN, radius=1,
                         min_support=0.1, min_lift=1.2, max_items_per_rule=3,
@@ -121,26 +119,21 @@ def test_resolution_check_precedes_shuffles_and_only_skips_impossible_sizes(
     result = Result(mined, {}, [], np.array(["A", "B", "C"]), settings)
 
     def shuffling(rules, *args, permutation_dir=None):
-        # A blocked size still gets its raw p-values, so every mined rule is shuffled.
-        assert len(rules) == 3
-        assert len(caplog.records) == len(blocked), "warnings must precede shuffling"
-        for size in blocked:
-            assert f"[FOV1] Insufficient permutation resolution for {size}-item" in caplog.text
+        # Complex rules are left to the conditional test, so only the pairs are shuffled.
+        assert rules.index.tolist() == [42, 7]
+        assert len(caplog.records) == int(blocked), "warnings must precede shuffling"
+        if blocked:
+            assert "[FOV1] Insufficient permutation resolution for 2-item" in caplog.text
         return np.full(len(rules), 1 / (shuffles + 1))
 
     monkeypatch.setattr(import_module("spatial_association_rules.mine"), "p_values_for", shuffling)
     tested = result.add_p_values(shuffles, max_individual_fdr=cutoff, sample_id="FOV1")
     assert tested.index.tolist() == [42, 7, 9]
-    assert tested.p_value.tolist() == [1 / (shuffles + 1)] * 3
-    for pos, size in enumerate([2, 2, 3]):
-        adjusted = tested.iloc[pos].individual_fdr
-        if size in blocked:
-            assert np.isnan(adjusted)
-        else:
-            # For pairs: 18 candidates / 2 mined, including opposite kinds.
-            # For triples: 54 candidates / 1 mined, independent of the pair ranks.
-            factor = 9 if size == 2 else 54
-            assert adjusted == pytest.approx(min(1, factor / (shuffles + 1)))
+    assert tested.regular_p_value.iloc[:2].tolist() == [1 / (shuffles + 1)] * 2
+    assert np.isnan(tested.regular_p_value.iloc[2]) and np.isnan(tested.individual_fdr.iloc[2])
+    # For pairs: 18 candidates / 2 mined, including opposite kinds.
+    expected = np.nan if blocked else min(1, 9 / (shuffles + 1))
+    np.testing.assert_allclose(tested.individual_fdr.iloc[:2], [expected] * 2)
 
 
 @pytest.mark.parametrize("cutoff", [0, -0.1, 1.1, float("nan"), float("inf")])
@@ -162,7 +155,7 @@ def test_raw_p_values_can_be_requested_without_fdr(monkeypatch):
     monkeypatch.setattr(module, "fdr_families", lambda *args, **kwargs: pytest.fail("FDR ran"))
 
     tested = result.add_p_values(9, calculate_fdr=False)
-    assert tested.p_value.tolist() == [0.2]
+    assert tested.regular_p_value.tolist() == [0.2]
     assert "individual_fdr" not in tested
     with pytest.raises(ValueError, match="max_individual_fdr requires calculate_fdr"):
         result.add_p_values(9, max_individual_fdr=0.05, calculate_fdr=False)

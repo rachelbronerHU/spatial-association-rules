@@ -6,15 +6,15 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from spatial_association_rules import Method, Settings, Weighting, classify_rules
+from spatial_association_rules import Method, Settings, Weighting
 from spatial_association_rules.mine import Result
 from spatial_association_rules.transactions import Patch, build_transactions
 from spatial_association_rules.validation import conditional
+from spatial_association_rules.validation.false_discovery import fdr_by_size, fdr_families
 
 
-def rule(ants, cons, kind="attracts", fdr=0.01):
-    return dict(antecedents=tuple(ants), consequents=tuple(cons), kind=kind,
-                individual_fdr=fdr, p_value=0.001)
+def rule(ants, cons, kind="attracts"):
+    return dict(antecedents=tuple(ants), consequents=tuple(cons), kind=kind)
 
 
 def patch(center, neighbors, weights):
@@ -45,36 +45,53 @@ def sample(weighting=Weighting.BINARY, consequent=False, two_parents=False):
                         avoidance_max_lift=0.8)
     rules = pd.DataFrame(rows)
     rules.attrs["labels_kept_fixed"] = ("E",) if consequent else ()
-    result = Result(rules, {"patches_kept": len(patches)}, patches, np.array(labels), settings)
-    return result, rules
+    result = Result(rules, {"patches_kept": len(patches)}, patches, np.array(labels), settings,
+                    raw_rules=rules.copy())
+    return result, observe(result, rules)
 
 
-def direct_score(result, rules, labels):
-    """Plain patch arithmetic, independent of the vectorized conditional scorer."""
+def measure(result, row, labels):
+    """(lift, conviction) from plain patch arithmetic; NaN where a side is absent."""
     transactions, _ = build_transactions(result.patches, labels, result.settings)
-    if not transactions:
-        return 0
 
-    def measure(row):
-        def support(items):
-            return sum(min(t.get(item, 0) for item in items) for t in transactions) / len(transactions)
-        ant, con = support(row.antecedents), support(row.consequents)
-        if ant == 0 or con == 0:
-            return None
-        confidence = support(row.antecedents + row.consequents) / ant
-        if len(rules.iloc[-1].consequents) == 1:
-            return confidence / con
-        if con == 1:
-            return None
-        return (1 - con) / (1 - confidence) if confidence < 1 else np.inf
+    def support(items):
+        return (sum(min(t.get(item, 0) for item in items) for t in transactions)
+                / len(transactions)) if transactions else 0
 
-    child, parent = measure(rules.iloc[-1]), measure(rules.iloc[0])
-    if child is None or parent is None:
-        return 0
-    if child == parent:
-        return 1
-    numerator, denominator = (parent, child) if rules.iloc[-1].kind == "avoids" else (child, parent)
-    return numerator / denominator if denominator else np.inf
+    ant, con = support(row.antecedents), support(row.consequents)
+    if not ant or not con:
+        return np.nan, np.nan
+    confidence = support(tuple(row.antecedents) + tuple(row.consequents)) / ant
+    conviction = (np.nan if con >= 1 else np.inf if confidence >= 1
+                  else (1 - con) / (1 - confidence))
+    return confidence / con, conviction
+
+
+def metric(result, row, labels, name=None):
+    """The value a complex rule is judged by; by default lift for one consequent, else conviction."""
+    name = name or ("lift" if len(row.consequents) == 1 else "conviction")
+    return measure(result, row, labels)[0 if name == "lift" else 1]
+
+
+def observe(result, rules):
+    """Stand in for the mined lift and conviction columns."""
+    values = [measure(result, row, result.labels) for row in rules.itertuples()]
+    observed = rules.assign(lift=[v[0] for v in values], conviction=[v[1] for v in values])
+    observed.attrs = rules.attrs
+    return observed
+
+
+def extreme(value, observed, kind):
+    if np.isnan(value):
+        return False
+    return (value <= observed if kind == "avoids" else value >= observed) or np.isclose(value, observed)
+
+
+def four_shifts(result):
+    for shift in range(4):
+        shuffled = result.labels.copy()
+        shuffled[6:10] = result.labels[np.roll(np.arange(6, 10), shift)]
+        yield shuffled
 
 
 def enumerate_four_shuffles(monkeypatch):
@@ -84,64 +101,37 @@ def enumerate_four_shuffles(monkeypatch):
     monkeypatch.setattr(conditional.np.random, "default_rng", generator)
 
 
-def direct_pass(result, row, labels):
-    """Judge regular thresholds using scalar supports from patch dictionaries."""
-    transactions, _ = build_transactions(result.patches, labels, result.settings)
-    if not transactions:
-        return False
-    n = len(transactions)
-    def support(items):
-        return sum(min(t.get(item, 0) for item in items) for t in transactions) / n
-    ant, con = support(row.antecedents), support(row.consequents)
-    if ant <= 0 or con <= 0:
-        return False
-    joint = support(row.antecedents + row.consequents)
-    confidence, lift, leverage = joint / ant, joint / (ant * con), joint - ant * con
-    settings = result.settings
-    if row.kind == "avoids":
-        return (lift < 1 and lift <= settings.avoidance_max_lift
-                and ant * n >= settings.min_patches
-                and ant * con * n >= settings.avoidance_min_expected_meetings
-                and (settings.avoidance_max_leverage is None
-                     or leverage <= settings.avoidance_max_leverage))
-    conviction = (1 - con) / (1 - confidence) if confidence < 1 else np.inf
-    needed = settings.min_support
-    if settings.strong_confidence is not None and confidence >= settings.strong_confidence:
-        needed = settings.min_support_when_strong
-    return (lift >= 1 and lift >= settings.min_lift
-            and joint >= max(needed, settings.min_patches / n)
-            and all(limit is None or value >= limit for value, limit in (
-                (confidence, settings.min_confidence), (leverage, settings.min_leverage),
-                (conviction, settings.min_conviction))))
+def expected_p_value(result, rules, name=None):
+    row = rules.iloc[-1]
+    observed = metric(result, row, result.labels, name)
+    hits = sum(extreme(metric(result, row, labels, name), observed, row.kind)
+               for labels in four_shifts(result))
+    return (1 + hits) / 5
 
 
-def test_one_sample_workflow_from_p_values_to_classification():
+def test_one_sample_workflow_from_p_values_to_conditional():
     # Two known rules make every stage easy to inspect in a debugger.
     result, rules = sample()
-    rules["lift"] = [1.0, 2.0]  # A -> C, then A + B -> C.
+    result.rules = rules
 
-    # A cutoff of 1 keeps the example short; this is a workflow check.
     original = result.add_p_values(19, random_seed=7, max_individual_fdr=1)
-    assert original.p_value.tolist() == pytest.approx([0.2, 0.1])
-    assert original.individual_fdr.tolist() == [1.0, 1.0]
+    assert np.isfinite(original.regular_p_value.iloc[0])
+    assert np.isfinite(original.individual_fdr.iloc[0])
+    # The complex rule is never shuffled here; the conditional test judges it.
+    assert pd.isna(original.regular_p_value.iloc[1]) and pd.isna(original.individual_fdr.iloc[1])
 
-    plan = result.conditional_test_plan(original, max_individual_fdr=1)
+    plan = result.conditional_test_plan(original)
     assert plan.fixed_types.tolist() == [("A", "C")]
+    assert plan.simpler_rule.tolist() == ["A -> C"]
+    assert plan.observed.tolist() == [rules.lift.iloc[1]]
     assert plan.status.tolist() == ["ready"]
 
-    tested, comparisons = result.add_conditional_p_values(
-        original, n_shuffles=19, random_seed=7, max_individual_fdr=1,
-    )
-    assert tested.conditional_p_value.iloc[1] == pytest.approx(0.3)
-    assert tested.conditional_fdr.iloc[1] == 1.0
-    assert "conditional_tests" not in tested
-    assert comparisons.p_value.tolist() == pytest.approx([0.3])
-    assert comparisons.observed_gain.tolist() == pytest.approx([2.0])
-
-    classified = classify_rules(tested, max_individual_fdr=1)
-    assert classified.rule_type.tolist() == ["pairwise", "complex-antecedents"]
-    assert classified.complex_class.iloc[1] == "stronger_than_simpler"
-    assert classified.adds_information.tolist() == [True, True]
+    tested, comparisons = result.add_conditional_p_values(original, n_shuffles=19, random_seed=7)
+    assert tested.conditional_status.tolist() == ["not_applicable", "tested"]
+    assert tested.conditional_p_value.iloc[1] == comparisons.p_value.iloc[0]
+    assert np.isfinite(tested.conditional_individual_fdr.iloc[1])
+    assert "conditional_gain_p_value" not in tested
+    assert not {"simpler_idx", "observed_gain", "gain_p_value"} & set(comparisons)
 
 
 @pytest.mark.parametrize("weighting", [Weighting.BINARY, Weighting.WEIGHTED])
@@ -156,68 +146,41 @@ def test_p_value_matches_explicit_patch_arithmetic(monkeypatch, weighting, conse
             # B and C co-occur outside A patches, so the consequent still exists.
             result.patches[-4:] = [patch(10, [5, 8], [1, 1]),
                                    patch(11, [6], [1]), patch(12, [7], [1]), patch(13, [9], [1])]
-    observed = direct_score(result, rules, result.labels)
-    passed, gains = [], []
-    for shift in range(4):
-        shuffled = result.labels.copy()
-        shuffled[6:10] = result.labels[np.roll(np.arange(6, 10), shift)]
-        passed.append(direct_pass(result, rules.iloc[-1], shuffled))
-        gains.append(direct_score(result, rules, shuffled))
-    expected = (1 + sum(passed)) / 5
-    expected_gain = (1 + sum(gain >= observed or np.isclose(gain, observed) for gain in gains)) / 5
+        rules = observe(result, rules)
+    expected = expected_p_value(result, rules)
     enumerate_four_shuffles(monkeypatch)
     tested, comparisons = result.add_conditional_p_values(rules, n_shuffles=4, random_seed=10)
     assert tested.conditional_p_value.iloc[-1] == pytest.approx(expected)
-    assert tested.conditional_gain_p_value.iloc[-1] == pytest.approx(expected_gain)
-    assert comparisons.observed_gain.iloc[0] == pytest.approx(observed)
+    assert comparisons.observed.iloc[0] == rules.iloc[-1][comparisons.metric.iloc[0]]
     assert tested.conditional_status.iloc[-1] == "tested"
     pd.testing.assert_frame_equal(tested[rules.columns], rules)
 
 
-@pytest.mark.parametrize("weighting", [Weighting.BINARY, Weighting.WEIGHTED])
-def test_fixed_comparison_counts_threshold_passes_regardless_of_observed_gain(monkeypatch, weighting):
+@pytest.mark.parametrize("changes", [
+    {"min_lift": 3}, {"min_support": 0.3}, {"min_patches": 2}, {"min_confidence": 0.9},
+    {"min_leverage": 0.08}, {"min_conviction": 3}, {"avoidance_min_expected_meetings": 1},
+])
+def test_mining_thresholds_do_not_change_the_p_value(monkeypatch, changes):
+    result, rules = sample(Weighting.WEIGHTED)
+    enumerate_four_shuffles(monkeypatch)
+    expected, _ = result.add_conditional_p_values(rules, n_shuffles=4)
+    result.settings = result.settings.replace(**changes)
+    enumerate_four_shuffles(monkeypatch)
+    actual, _ = result.add_conditional_p_values(rules, n_shuffles=4)
+    assert actual.conditional_p_value.iloc[-1] == expected.conditional_p_value.iloc[-1]
+
+
+def test_a_higher_mined_metric_is_harder_to_reach(monkeypatch):
+    result, rules = sample(Weighting.WEIGHTED)
     p_values = []
-    for b_position in range(6, 10):
-        result, rules = sample(weighting)
-        result.labels[[6, b_position]] = result.labels[[b_position, 6]]
+    for lift in [0.0, rules.lift.iloc[-1], np.inf]:
         enumerate_four_shuffles(monkeypatch)
-        tested, _ = result.add_conditional_p_values(rules, n_shuffles=4)
+        tested, _ = result.add_conditional_p_values(rules.assign(lift=[rules.lift.iloc[0], lift]),
+                                                    n_shuffles=4)
         p_values.append(tested.conditional_p_value.iloc[-1])
-    # The entire null and thresholds are the same, regardless of the observed B location.
-    assert p_values == pytest.approx([0.6] * 4)
-
-
-@pytest.mark.parametrize("changes,expected", [
-    ({"min_lift": 3}, 0.4),
-    ({"min_support": 0.3}, 0.2),
-    ({"min_patches": 2}, 0.2),
-    ({"min_confidence": 0.9}, 0.4),
-    ({"min_leverage": 0.08}, 0.4),
-    ({"min_conviction": 3}, 0.4),
-    ({"min_support": 0.3, "strong_confidence": 0.9,
-      "min_support_when_strong": 0.1}, 0.4),
-])
-def test_conditional_uses_every_regular_attraction_threshold(monkeypatch, changes, expected):
-    result, rules = sample(Weighting.WEIGHTED)
-    result.settings = result.settings.replace(**changes)
-    enumerate_four_shuffles(monkeypatch)
-    tested, _ = result.add_conditional_p_values(rules, n_shuffles=4)
-    assert tested.conditional_p_value.iloc[-1] == pytest.approx(expected)
-
-
-@pytest.mark.parametrize("changes,expected", [
-    ({"avoidance_min_expected_meetings": 0.01}, 0.6),
-    ({"avoidance_min_expected_meetings": 0.01, "min_patches": 2}, 0.2),
-    ({"avoidance_min_expected_meetings": 0.01, "avoidance_max_leverage": -0.1}, 0.2),
-    ({"avoidance_min_expected_meetings": 1}, 0.2),
-])
-def test_conditional_uses_regular_avoidance_thresholds(monkeypatch, changes, expected):
-    result, rules = sample(Weighting.WEIGHTED)
-    rules.loc[rules.index[-1], "kind"] = "avoids"
-    result.settings = result.settings.replace(**changes)
-    enumerate_four_shuffles(monkeypatch)
-    tested, _ = result.add_conditional_p_values(rules, n_shuffles=4)
-    assert tested.conditional_p_value.iloc[-1] == pytest.approx(expected)
+    assert p_values[0] == 1
+    assert p_values[0] >= p_values[1] >= p_values[2]
+    assert p_values[2] == pytest.approx(0.2)
 
 
 def test_all_parent_cells_and_configured_types_stay_fixed(monkeypatch):
@@ -235,7 +198,7 @@ def test_all_parent_cells_and_configured_types_stay_fixed(monkeypatch):
     assert plan.movable_cells.tolist() == [4]
     result.add_conditional_p_values(rules, n_shuffles=31, random_seed=5)
     fixed = np.isin(result.labels, ["A", "C", "E"])
-    assert len(captured) == 32
+    assert len(captured) == 31  # The mined metric is read, never re-measured.
     for shuffled in captured[1:]:
         np.testing.assert_array_equal(shuffled[fixed], captured[0][fixed])
         np.testing.assert_array_equal(shuffled.sum(axis=0), captured[0].sum(axis=0))
@@ -247,19 +210,15 @@ def test_two_parents_use_separate_batches_and_combine_with_max():
     plan = result.conditional_test_plan(rules)
     assert set(plan.fixed_types) == {("A", "C"), ("B", "C")}
     assert plan.attrs["shuffle_batches"] == 2
-    # A cutoff of 1 needs no minimum shuffles, so conditional_fdr is calculated.
-    tested, comparisons = result.add_conditional_p_values(
-        rules, n_shuffles=39, random_seed=17, max_individual_fdr=1,
-    )
+    tested, comparisons = result.add_conditional_p_values(rules, n_shuffles=39, random_seed=17)
     details = comparisons.loc[comparisons.rule_idx == len(rules) - 1]
     assert len(details) == 2
     assert details.status.tolist() == ["tested", "tested"]
     assert tested.conditional_p_value.iloc[-1] == details.p_value.max()
-    assert tested.conditional_gain_p_value.iloc[-1] == details.gain_p_value.max()
     # Four labels give 4 * C(4, 2) * 3 splits * 2 kinds = 144 candidates.
-    assert tested.conditional_fdr.iloc[-1] == min(1, 144 * tested.conditional_p_value.iloc[-1])
-    assert tested.conditional_fdr.iloc[:-1].isna().all()
-    assert tested.conditional_gain_fdr.iloc[-1] == min(1, 144 * tested.conditional_gain_p_value.iloc[-1])
+    p_value = tested.conditional_p_value.iloc[-1]
+    assert tested.conditional_individual_fdr.iloc[-1] == min(1, 144 * p_value)
+    assert tested.conditional_individual_fdr.iloc[:-1].isna().all()
     assert tested.attrs["conditional_test_summary"]["shuffled_tissues"] == 78
 
 
@@ -275,7 +234,7 @@ def test_rules_with_the_same_fixed_types_share_shuffles(monkeypatch):
 
     monkeypatch.setattr(conditional, "_transactions", capture)
     tested, _ = result.add_conditional_p_values(rules, n_shuffles=19, random_seed=6)
-    assert len(calls) == 20  # One observed rebuild, then one shared batch.
+    assert len(calls) == 19  # One shared batch.
     assert tested.conditional_p_value.iloc[1] == tested.conditional_p_value.iloc[2]
     assert tested.attrs["conditional_test_summary"]["shuffle_batches"] == 1
 
@@ -286,7 +245,8 @@ def test_reordering_rows_does_not_change_the_seeded_results():
     reordered = rules.iloc[::-1]
     second, _ = result.add_conditional_p_values(reordered, n_shuffles=29, random_seed=13)
     pd.testing.assert_series_equal(first.conditional_p_value, second.conditional_p_value.iloc[::-1])
-    pd.testing.assert_series_equal(first.conditional_fdr, second.conditional_fdr.iloc[::-1])
+    pd.testing.assert_series_equal(first.conditional_individual_fdr,
+                                   second.conditional_individual_fdr.iloc[::-1])
 
 
 def test_comparisons_use_stored_rule_ids_not_row_positions():
@@ -294,30 +254,43 @@ def test_comparisons_use_stored_rule_ids_not_row_positions():
     rules = rules.assign(rule_idx=[10, 11, 12]).iloc[::-1]
     _, comparisons = result.add_conditional_p_values(rules, n_shuffles=9, random_seed=13)
     assert comparisons.rule_idx.tolist() == [12, 12]
-    assert set(comparisons.simpler_idx) == {10, 11}
+    assert set(comparisons.simpler_rule) == {"A -> C", "B -> C"}
 
 
-@pytest.mark.parametrize("fdr", [0.9, np.nan])
-def test_only_significant_parents_are_tested(fdr):
+def test_simpler_rules_come_from_raw_rules_not_the_mined_table():
     result, rules = sample()
-    rules.loc[0, "individual_fdr"] = fdr
+    # Parent present only in raw_rules, without any metric or FDR column: still compared.
+    result.raw_rules = rules.iloc[[0]][["antecedents", "consequents", "kind"]]
+    tested, _ = result.add_conditional_p_values(rules.iloc[[1]], n_shuffles=9)
+    assert tested.conditional_status.tolist() == ["tested"]
+    # Parent mined but not in raw_rules: nothing to compare with.
+    result.raw_rules = rules.iloc[[1]]
     assert result.conditional_test_plan(rules).empty
     tested, comparisons = result.add_conditional_p_values(rules, n_shuffles=9)
-    assert tested.conditional_status.iloc[-1] == "no_significant_simpler"
+    assert tested.conditional_status.iloc[-1] == "no_simpler"
     assert pd.isna(tested.conditional_p_value.iloc[-1])
     assert comparisons.empty
 
 
-def test_parent_kind_does_not_restrict_the_comparison():
+@pytest.mark.parametrize("kind", ["attracts", "avoids"])
+def test_parent_kind_does_not_restrict_the_comparison(kind):
     result, rules = sample()
-    rules.loc[0, "kind"] = "avoids"
+    result.raw_rules = result.raw_rules.assign(kind=kind)
     tested, _ = result.add_conditional_p_values(rules, n_shuffles=9, random_seed=2)
     assert tested.conditional_status.iloc[-1] == "tested"
+
+
+def test_parents_of_both_kinds_with_the_same_types_are_one_comparison():
+    result, rules = sample()
+    raw = result.raw_rules
+    result.raw_rules = pd.concat([raw, raw.iloc[[0]].assign(kind="avoids")], ignore_index=True)
+    assert len(result.conditional_test_plan(rules)) == 1
 
 
 @pytest.mark.parametrize("case,reason", [
     ("configured", "all_rule_types_fixed"), ("repeated", "all_rule_types_fixed"),
     ("one_label", "no_exchangeable_labels"), ("missing", "missing_cell_type"),
+    ("undefined", "undefined_metric"),
 ])
 def test_impossible_comparisons_are_missing_not_significant(case, reason):
     result, rules = sample()
@@ -327,8 +300,10 @@ def test_impossible_comparisons_are_missing_not_significant(case, reason):
         rules.at[1, "antecedents"] = ("A_CENTER", "A_NEIGHBOR")
     elif case == "one_label":
         result.labels[7:10] = "B"
-    else:
+    elif case == "missing":
         rules.at[1, "antecedents"] = ("A_CENTER", "Missing_NEIGHBOR")
+    else:
+        rules.at[1, "lift"] = np.nan
     plan = result.conditional_test_plan(rules)
     assert plan.status.tolist() == [reason]
     tested, _ = result.add_conditional_p_values(rules, n_shuffles=9)
@@ -337,63 +312,53 @@ def test_impossible_comparisons_are_missing_not_significant(case, reason):
     assert tested.attrs["conditional_test_summary"]["shuffle_batches"] == 0
 
 
-def test_one_untestable_parent_prevents_a_partial_combined_p_value():
+def test_one_untestable_parent_prevents_a_partial_combined_p_value(caplog):
     result, rules = sample(two_parents=True)
     rules.attrs["labels_kept_fixed"] = ("A",)
-    tested, comparisons = result.add_conditional_p_values(rules, n_shuffles=9, random_seed=4)
+    tested, comparisons = result.add_conditional_p_values(rules, n_shuffles=9, random_seed=4,
+                                                         max_conditional_individual_fdr=0.05)
     assert set(comparisons.status) == {"tested", "all_rule_types_fixed"}
     assert pd.isna(tested.conditional_p_value.iloc[-1])
+    assert "Insufficient permutation resolution" not in caplog.text
 
 
-def test_crowding_filter_is_reapplied_for_observed_and_shuffled_tissues(monkeypatch):
+def test_crowding_filter_is_reapplied_for_shuffled_tissues(monkeypatch):
     result, rules = sample(Weighting.WEIGHTED)
     result.settings = result.settings.replace(max_one_type_share=0.5)
     result.patches.append(patch(7, [8], [0.7]))  # D,D is dropped; B,D is retained.
+    rules = observe(result, rules)
+    expected = expected_p_value(result, rules)
     enumerate_four_shuffles(monkeypatch)
-    observed = direct_score(result, rules, result.labels)
-    passed = []
-    for shift in range(4):
-        shuffled = result.labels.copy()
-        shuffled[6:10] = result.labels[np.roll(np.arange(6, 10), shift)]
-        passed.append(direct_pass(result, rules.iloc[-1], shuffled))
-    expected = (1 + sum(passed)) / 5
     tested, _ = result.add_conditional_p_values(rules, n_shuffles=4)
     assert tested.conditional_p_value.iloc[-1] == pytest.approx(expected)
 
 
 def test_pairwise_mixed_and_empty_frames_are_not_tested():
     result, rules = sample()
-    rules = pd.DataFrame([rules.iloc[0].to_dict(), rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR", "D_NEIGHBOR"])])
+    mixed = dict(rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR", "D_NEIGHBOR"]), lift=2.0, conviction=2.0)
+    rules = pd.DataFrame([rules.iloc[0].to_dict(), mixed])
     tested, comparisons = result.add_conditional_p_values(rules, n_shuffles=9)
     assert tested.conditional_status.tolist() == ["not_applicable", "not_applicable"]
     assert tested.conditional_p_value.isna().all()
-    assert tested.conditional_fdr.isna().all()
+    assert tested.conditional_individual_fdr.isna().all()
     assert comparisons.empty
     empty, empty_comparisons = result.add_conditional_p_values(rules.iloc[:0], n_shuffles=9)
     assert empty.empty
     assert empty_comparisons.empty
     assert "conditional_p_value" in empty
-    assert "conditional_fdr" in empty
+    assert "conditional_individual_fdr" in empty
 
 
 def test_duplicate_indices_and_original_columns_are_preserved():
     result, rules = sample()
     rules.index = [8, 8]
     original = rules.copy(deep=True)
-    tested, _ = result.add_conditional_p_values(rules, n_shuffles=9, random_seed=2,
-                                                max_individual_fdr=1)
+    tested, _ = result.add_conditional_p_values(rules, n_shuffles=9, random_seed=2)
     pd.testing.assert_frame_equal(rules, original)
     pd.testing.assert_frame_equal(tested[original.columns], original)
     assert tested.conditional_status.tolist() == ["not_applicable", "tested"]
-    assert pd.isna(tested.conditional_fdr.iloc[0])
-    assert np.isfinite(tested.conditional_fdr.iloc[1])
-
-
-@pytest.mark.parametrize("value", [None, 0, -1, 2, np.nan, np.inf])
-def test_a_valid_parent_fdr_cutoff_is_required(value):
-    result, rules = sample()
-    with pytest.raises(ValueError, match="max_individual_fdr"):
-        result.conditional_test_plan(rules, max_individual_fdr=value)
+    assert pd.isna(tested.conditional_individual_fdr.iloc[0])
+    assert np.isfinite(tested.conditional_individual_fdr.iloc[1])
 
 
 @pytest.mark.parametrize("value", [0, -1, 1.5, True])
@@ -403,27 +368,67 @@ def test_shuffle_count_must_be_a_positive_integer(value):
         result.add_conditional_p_values(rules, n_shuffles=value)
 
 
-def test_missing_fdr_column_does_not_silently_enable_all_parents():
+@pytest.mark.parametrize("column", ["lift", "conviction"])
+def test_mined_metric_columns_are_required(column):
     result, rules = sample()
-    with pytest.raises(ValueError, match="individual_fdr"):
-        result.conditional_test_plan(rules.drop(columns="individual_fdr"))
+    with pytest.raises(ValueError, match="columns"):
+        result.conditional_test_plan(rules.drop(columns=column))
 
 
-def test_undefined_observed_gain_does_not_prevent_threshold_testing():
-    result, rules = sample(consequent=True)
-    result.labels[[6, 8]] = result.labels[[8, 6]]  # B and C never co-occur anywhere.
-    tested, comparisons = result.add_conditional_p_values(rules, n_shuffles=9)
-    assert tested.conditional_status.iloc[-1] == "tested"
-    assert comparisons.status.tolist() == ["tested"]
-    assert pd.isna(comparisons.observed_gain.iloc[0])
-    assert np.isfinite(tested.conditional_p_value.iloc[-1])
-    assert pd.isna(tested.conditional_gain_p_value.iloc[-1])
+@pytest.mark.parametrize("consequent", [False, True])
+@pytest.mark.parametrize("name", ["lift", "conviction"])
+def test_metric_can_be_chosen_for_every_rule(monkeypatch, consequent, name):
+    result, rules = sample(Weighting.WEIGHTED, consequent)
+    assert result.conditional_test_plan(rules, metric=name).metric.tolist() == [name]
+    expected = expected_p_value(result, rules, name)
+    enumerate_four_shuffles(monkeypatch)
+    tested, _ = result.add_conditional_p_values(rules, n_shuffles=4, metric=name)
+    assert tested.conditional_p_value.iloc[-1] == pytest.approx(expected)
+
+
+def test_only_the_chosen_metric_column_is_required():
+    result, rules = sample()
+    assert len(result.conditional_test_plan(rules.drop(columns="conviction"), metric="lift")) == 1
+
+
+@pytest.mark.parametrize("options,match", [
+    (dict(metric="confidence"), "metric"),
+    (dict(max_conditional_individual_fdr=0), "max_conditional_individual_fdr"),
+    (dict(max_conditional_individual_fdr=0.05, calculate_fdr=False),
+     "max_conditional_individual_fdr requires"),
+])
+def test_invalid_options_are_rejected(options, match):
+    result, rules = sample()
+    with pytest.raises(ValueError, match=match):
+        result.add_conditional_p_values(rules, n_shuffles=9, **options)
+
+
+def test_simpler_rules_fixing_the_same_types_are_one_comparison():
+    result, rules = sample()
+    rules.at[1, "antecedents"] = ("A_CENTER", "A_NEIGHBOR", "B_NEIGHBOR")
+    # A -> C and A + A -> C both fix A and C.
+    result.raw_rules = pd.DataFrame([rule(["A_CENTER"], ["C_NEIGHBOR"]),
+                                     rule(["A_CENTER", "A_NEIGHBOR"], ["C_NEIGHBOR"])])
+    plan = result.conditional_test_plan(rules)
+    assert plan.fixed_types.tolist() == [("A", "C")]
+    assert plan.simpler_rule.tolist() == ["A -> C"]
+
+
+def test_ties_count_and_missing_shuffled_metrics_never_do():
+    values = np.array([np.nan, 2.0, 1.0, np.inf, 2.0 + 1e-14])
+    attracts = conditional._as_strong(values, np.full(5, 2.0), np.zeros(5, dtype=bool))
+    avoids = conditional._as_strong(values, np.full(5, 2.0), np.ones(5, dtype=bool))
+    assert attracts.tolist() == [False, True, False, True, True]
+    assert avoids.tolist() == [False, True, True, False, True]
+    infinite = conditional._as_strong(np.array([np.inf, 5.0]), np.full(2, np.inf),
+                                      np.zeros(2, dtype=bool))
+    assert infinite.tolist() == [True, False]
 
 
 def test_original_fixed_label_configuration_is_recorded_and_inherited():
-    result, _ = sample(consequent=True)
+    result, rules = sample(consequent=True)
+    result.rules = rules
     tested = result.add_p_values(n_shuffles=0, labels_kept_fixed=("E",))
-    tested["individual_fdr"] = 0.01
     assert tested.attrs["labels_kept_fixed"] == ("E",)
     plan = result.conditional_test_plan(tested)
     assert plan.fixed_types.tolist() == [("A", "C", "E")]
@@ -437,22 +442,14 @@ def test_parent_type_names_are_exact_even_when_they_contain_a_star():
     result.labels = np.array(["A*"] * 4 + list("CCBDDD") + ["Ax"], dtype=object)
     rules.at[0, "antecedents"] = ("A*_CENTER",)
     rules.at[1, "antecedents"] = ("A*_CENTER", "B_NEIGHBOR")
+    result.raw_rules = rules
     plan = result.conditional_test_plan(rules)
     assert plan.fixed_types.tolist() == [("A*", "C")]
     assert plan.movable_cells.tolist() == [5]  # Ax stays movable.
 
 
-def test_score_handles_zero_and_infinite_metrics_without_nan():
-    values = np.array([[np.inf, np.inf], [np.inf, np.inf], [0, 0], [0, 0], [2, 2]])
-    comparisons = pd.DataFrame(dict(rule_pos=[0, 2, 0, 2, 4], simpler_pos=[1, 3, 4, 4, 0],
-                                   metric=["conviction"] * 5,
-                                   kind=["attracts", "avoids", "attracts", "avoids", "attracts"]))
-    scores = conditional._scores(values, comparisons, np.arange(5))
-    np.testing.assert_array_equal(scores, [1, 1, np.inf, np.inf, 0])
-
-
 @pytest.mark.parametrize("one_sided,four_item_candidates", [(True, 128), (False, 224)])
-def test_conditional_fdr_groups_sizes_and_pads_all_candidates(one_sided, four_item_candidates):
+def test_conditional_individual_fdr_groups_sizes_and_pads_all_candidates(one_sided, four_item_candidates):
     result, _ = sample()
     settings = result.settings.replace(one_sided_complex_rules=one_sided)
     rules = pd.DataFrame([
@@ -466,29 +463,39 @@ def test_conditional_fdr_groups_sizes_and_pads_all_candidates(one_sided, four_it
     rules["conditional_p_value"] = [0.0001, 0.0004, 0.03, 0.0002, np.nan, np.nan]
     # BH ranks the three available 3-item values together, with 144 total candidates.
     expected = [0.0144, 0.0288, 1, four_item_candidates * 0.0002, np.nan, np.nan]
-    actual = conditional._conditional_fdr(rules, "conditional_p_value", "conditional_fdr",
-                                          result.labels, settings, n_shuffles=1, max_fdr=None)
+    p_values = rules["conditional_p_value"]
+    families = fdr_families(rules[p_values.notna()], result.labels, settings, n_shuffles=1,
+                            max_fdr=None, column="conditional_individual_fdr")
+    actual = fdr_by_size(rules, p_values, families)
     np.testing.assert_allclose(actual, expected, equal_nan=True)
 
 
-def test_conditional_fdr_counts_only_enabled_kinds():
+def test_conditional_individual_fdr_counts_only_enabled_kinds():
     result, rules = sample()
-    settings = result.settings.replace(include_avoidance_rules=False)
-    rules["conditional_p_value"] = [np.nan, 0.0001]
+    result.settings = result.settings.replace(include_avoidance_rules=False)
+    rules.at[1, "lift"] = np.inf  # No shuffle can reach it, so p = 1/100.
+    tested, _ = result.add_conditional_p_values(rules, n_shuffles=99, random_seed=4)
     # Attraction only halves the 3-item family from 144 to 72 candidates.
-    actual = conditional._conditional_fdr(rules, "conditional_p_value", "conditional_fdr",
-                                          result.labels, settings, n_shuffles=1, max_fdr=None)
-    np.testing.assert_allclose(actual, [np.nan, 0.0072], equal_nan=True)
+    assert tested.conditional_p_value.iloc[1] == 0.01
+    np.testing.assert_allclose(tested.conditional_individual_fdr, [np.nan, 0.72], equal_nan=True)
 
 
-def test_too_few_shuffles_warns_and_leaves_conditional_fdr_missing(caplog):
+def test_too_few_shuffles_warns_before_shuffling_and_leaves_conditional_individual_fdr_missing(monkeypatch, caplog):
     result, rules = sample()
-    tested, _ = result.add_conditional_p_values(rules, n_shuffles=9, sample_id="FOV1")
+    rebuild = conditional._transactions
+
+    def capture(*args):
+        assert "[FOV1] Insufficient permutation resolution for 3-item" in caplog.text
+        return rebuild(*args)
+
+    monkeypatch.setattr(conditional, "_transactions", capture)
+    tested, _ = result.add_conditional_p_values(rules, n_shuffles=9, sample_id="FOV1",
+                                                max_conditional_individual_fdr=0.05)
     # 144 candidates and one tested rule need 2879 shuffles to reach BH <= 0.05.
     assert "[FOV1] Insufficient permutation resolution for 3-item" in caplog.text
     assert "At least 2879 shuffles" in caplog.text
     assert np.isfinite(tested.conditional_p_value.iloc[1])
-    assert tested.conditional_fdr.isna().all()
+    assert tested.conditional_individual_fdr.isna().all()
 
 
 def test_conditional_p_values_can_be_requested_without_fdr(caplog):
@@ -496,22 +503,17 @@ def test_conditional_p_values_can_be_requested_without_fdr(caplog):
     tested, _ = result.add_conditional_p_values(rules, n_shuffles=9, random_seed=4,
                                                 calculate_fdr=False)
     assert np.isfinite(tested.conditional_p_value.iloc[1])
-    assert "conditional_fdr" not in tested and "conditional_gain_fdr" not in tested
+    assert "conditional_individual_fdr" not in tested
     assert "Insufficient permutation resolution" not in caplog.text
-
-    raw = rules.drop(columns="individual_fdr")
-    with pytest.raises(ValueError, match="individual_fdr"):
-        result.add_conditional_p_values(raw, n_shuffles=9, calculate_fdr=False)
 
 
 def test_more_rules_than_candidates_warns_instead_of_raising(caplog):
     result, rules = sample()
     rules = pd.concat([rules.iloc[[1]]] * 145)
-    rules["conditional_p_value"] = 0.01
-    actual = conditional._conditional_fdr(rules, "conditional_p_value", "conditional_fdr",
-                                          result.labels, result.settings, n_shuffles=1, max_fdr=None)
+    tested, _ = result.add_conditional_p_values(rules, n_shuffles=1, random_seed=4)
     assert "145 3-item rules but only 144 candidates" in caplog.text
-    assert np.isnan(actual).all()
+    assert tested.conditional_p_value.notna().all()
+    assert tested.conditional_individual_fdr.isna().all()
 
 
 def test_lists_and_tuples_can_be_mixed_in_rule_sides():

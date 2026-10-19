@@ -120,7 +120,7 @@ costs an exponent.
 
 The weight stays in `[0, 1)`, so min-based support, confidence, lift, leverage and
 conviction are all still defined and still mean what they meant. FP-growth, `min_support`,
-`min_patches`, both searches, the shuffle test, the complex-rule classification, the FDR
+`min_patches`, both searches, both shuffle tests, the FDR
 and everything built on top keep working untouched.
 
 ---
@@ -318,13 +318,13 @@ library late. These are the ones that validate each piece.
 
 1. Change `transactions.py:114`. Add `share` to what `build_transactions` receives.
 2. Re-run one field and confirm epithelium clustering with itself now appears.
-   **Check it with a permutation on the measured lift, not with `p_value`** — see below.
+   **Check it with a permutation on the measured lift, not with `regular_p_value`** — see below.
 3. Full run. Compare rule counts per cell type against abundance; the correlation should
    drop sharply.
 4. Bandwidth sweep at 10 / 15 / 20µm.
 5. Optionally, the headroom threshold in `attracts()`.
 
-### Do not check this with `p_value`
+### Do not check this with `regular_p_value`
 
 Measured over 8 fields at 500 shuffles: the share of rules at p ≤ 0.05, before and after
 the change.
@@ -338,7 +338,7 @@ the change.
 
 The change does not disturb these — the 37 rules it rescues sit at p = 0.002 both before
 and after — but they cannot confirm it either. Every pair involving a common type is
-already at the floor. `p_value` counts how often a shuffle clears `min_lift`; for a
+already at the floor. `regular_p_value` counts how often a shuffle clears `min_lift`; for a
 common type a shuffle essentially never reaches 1.2, so the count is zero and p lands at
 `1/(n_shuffles+1)` whether or not the rule is real. Permute and compare the measured
 lift instead.

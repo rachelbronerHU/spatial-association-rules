@@ -11,7 +11,6 @@ from math import comb
 import numpy as np
 import pandas as pd
 
-from .complex_rules import DEFAULT_IMPROVEMENT_GAIN, classify_complex_rules
 from .transactions import is_center, strip_role
 
 ATTRACTS = "attracts"
@@ -300,13 +299,3 @@ def drop_rare_labels(rules, labels, settings):
         for row in rules.itertuples()
     ]
     return rules[keep]
-
-
-def classify_rules(rules, min_lift_gain=DEFAULT_IMPROVEMENT_GAIN, max_individual_fdr=None,
-                   min_consequent_conviction_gain=DEFAULT_IMPROVEMENT_GAIN):
-    """Classify all rows: antecedents by lift, consequents by conviction, mixed untested."""
-    return classify_complex_rules(rules, min_lift_gain, max_individual_fdr,
-                                  min_consequent_conviction_gain)
-
-
-filter_rules = classify_rules  # Compatibility with the original public name.

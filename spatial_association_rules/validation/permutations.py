@@ -24,12 +24,16 @@ def record_permutations(permutation_dir, n_shuffles, rule_idx, *, sample_id, tes
         yield None
         return
 
-    filename = "individual.npz" if test == "individual" else f"conditional_{batch:04d}.npz"
+    filename = "regular_p_value.npz" if test == "regular_p_value" else f"conditional_{batch:04d}.npz"
     path = sample_folder(permutation_dir, sample_id) / filename
     if path.exists():
         raise FileExistsError(f"{path} already exists; clear the permutation folder before re-running")
     shape = (n_shuffles, len(rule_idx))
-    dtypes = {"lift": float, "conviction": float, "passed_mining_filters": bool}
+    dtypes = {"lift": float, "conviction": float}
+    
+    if test == "regular_p_value": 
+        # Only the regular p-value test counts threshold passes, and not for conditional_p_value (complex rules)
+        dtypes["passed_mining_filters"] = bool
     with ExitStack() as buffers:
         arrays = {}
         try:

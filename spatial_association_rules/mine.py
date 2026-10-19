@@ -16,7 +16,7 @@ from .rules import drop_rare_labels, empty_rules, weight_matrix
 from .settings import Settings
 from .validation.significance import p_values_for
 from .validation.conditional import conditional_p_values, conditional_test_plan
-from .validation.false_discovery import fdr_by_size, fdr_families
+from .validation.false_discovery import check_fdr_cutoff, fdr_by_size, fdr_families
 from .transactions import Patch, build_transactions, find_patches, measure_patches
 
 
@@ -61,58 +61,61 @@ class Result:
     def add_p_values(self, n_shuffles, random_seed=None, labels_kept_fixed=(), sample_id="",
                      max_individual_fdr=None, calculate_fdr=True, permutation_dir=None):
         """
-        Return raw p-values and, if requested, individual_fdr for this sample.
-        Correct each rule size separately, with attraction and avoidance together.
+        Return raw p-values and, if requested, their corrected `individual_fdr` for this sample.
+        Only pairwise rules are shuffled. Complex rules keep NaN: the conditional test
+        judges them. Attraction and avoidance are corrected together.
 
         Rules dropped by the search count as p=1, without adding rows. With a cutoff
-        set, warn if too few shuffles are planned for any rule of a size to pass.
-        Those sizes still get raw p-values, but individual_fdr is NaN (missing).
-        A cutoff of None skips this check; calculate_fdr chooses whether to correct.
+        set, warn if too few shuffles are planned for any rule to pass; `individual_fdr`
+        is then NaN. calculate_fdr chooses whether to correct at all.
         If permutation_dir is set, save shuffle metrics under that directory.
         """
         if not isinstance(calculate_fdr, bool):
             raise ValueError("calculate_fdr must be a bool")
-        if max_individual_fdr is not None and not 0 < max_individual_fdr <= 1:
-            raise ValueError("max_individual_fdr must be in (0, 1], or None")
+        check_fdr_cutoff(max_individual_fdr, "max_individual_fdr")
         if not calculate_fdr and max_individual_fdr is not None:
             raise ValueError("max_individual_fdr requires calculate_fdr=True")
         labels_kept_fixed = tuple(labels_kept_fixed)
         rules = self.rules.copy()
         rules.drop(columns="individual_fdr", errors="ignore", inplace=True)
+        pairwise = (rules["antecedents"].map(len) + rules["consequents"].map(len) == 2).to_numpy(dtype=bool)
         if calculate_fdr:
             # Check before shuffling, so warnings come first.
-            families = fdr_families(rules, self.labels, self.settings, n_shuffles=n_shuffles,
+            families = fdr_families(rules[pairwise], self.labels, self.settings, n_shuffles=n_shuffles,
                                     max_fdr=max_individual_fdr, column="individual_fdr",
                                     sample_id=sample_id)
-        rules["p_value"] = p_values_for(
-            rules, self.patches, self.labels, self.settings,
+        rules["regular_p_value"] = np.nan
+        rules.loc[pairwise, "regular_p_value"] = p_values_for(
+            rules[pairwise], self.patches, self.labels, self.settings,
             n_shuffles, random_seed, labels_kept_fixed, sample_id,
             permutation_dir=permutation_dir,
         )
         if calculate_fdr:
-            rules["individual_fdr"] = fdr_by_size(rules, rules["p_value"], families)
+            rules["individual_fdr"] = fdr_by_size(rules, rules["regular_p_value"], families)
         rules.attrs["labels_kept_fixed"] = labels_kept_fixed
         return rules
 
-    def conditional_test_plan(self, tested, *, max_individual_fdr=0.05, labels_kept_fixed=()):
-        """Preview comparisons and fixed-type sets. No shuffles are run."""
-        return conditional_test_plan(tested, self.labels, max_individual_fdr, labels_kept_fixed)
+    def conditional_test_plan(self, tested, *, labels_kept_fixed=(), metric=None):
+        """Preview comparisons and fixed cell types. No shuffles are run."""
+        return conditional_test_plan(tested, self.raw_rules, self.labels, labels_kept_fixed, metric)
 
-    def add_conditional_p_values(self, tested, *, n_shuffles, max_individual_fdr=0.05,
-                                 random_seed=None, labels_kept_fixed=(), sample_id="",
-                                 calculate_fdr=True, permutation_dir=None):
-        """Return (rules, comparisons) with optional conditional_fdr.
+    def add_conditional_p_values(self, tested, *, n_shuffles, random_seed=None,
+                                 labels_kept_fixed=(), metric=None, sample_id="",
+                                 calculate_fdr=True, max_conditional_individual_fdr=None,
+                                 permutation_dir=None):
+        """Return (rules, comparisons) with conditional p-values for complex rules.
 
-        Inherits fixed labels recorded by add_p_values; labels_kept_fixed adds more.
-        Requires individual_fdr to select parents. If correction is requested, warns
-        when too few shuffles can reach the cutoff. See DESIGN.md.
-        If permutation_dir is set, save batch metrics under that directory.
+        Simpler rules come from raw_rules. Fixed labels recorded by add_p_values are
+        kept; labels_kept_fixed adds more. metric: "lift", "conviction", or None for
+        lift on complex antecedents and conviction on complex consequents. With
+        max_conditional_individual_fdr set, warn when too few shuffles can reach it. See DESIGN.md.
         """
         return conditional_p_values(
-            tested, self.patches, self.labels, self.settings, n_shuffles=n_shuffles,
-            max_individual_fdr=max_individual_fdr, random_seed=random_seed,
-            labels_kept_fixed=labels_kept_fixed, sample_id=sample_id,
+            tested, self.raw_rules, self.patches, self.labels, self.settings,
+            n_shuffles=n_shuffles, random_seed=random_seed,
+            labels_kept_fixed=labels_kept_fixed, metric=metric, sample_id=sample_id,
             calculate_fdr=calculate_fdr,
+            max_conditional_individual_fdr=max_conditional_individual_fdr,
             permutation_dir=permutation_dir,
         )
 

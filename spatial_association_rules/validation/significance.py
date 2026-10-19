@@ -112,7 +112,7 @@ def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labe
         rule_idx = rules["rule_idx"].to_numpy() if "rule_idx" in rules else np.arange(len(rules))
         fixed_types = tuple(sorted(set(labels[fixed])))
     with record_permutations(permutation_dir, n_shuffles, rule_idx,
-                             sample_id=sample_id, test="individual", fixed_types=fixed_types) as recorded:
+                             sample_id=sample_id, test="regular_p_value", fixed_types=fixed_types) as recorded:
         # Reuse ordinary row buffers; no mapped views leave the batch.
         metrics_out = (np.empty(len(rules)), np.empty(len(rules))) if recorded is not None else None
         for i in range(n_shuffles):
@@ -321,37 +321,47 @@ def _supports(layout, transactions, settings):
     return measured[layout.ant_at], measured[layout.con_at], measured[layout.joint_at]
 
 
+def measure_rules(layout, transactions, settings):
+    """Supports and metrics of every rule in this tissue, or None if nothing is usable."""
+    if transactions.size == 0 or not layout.usable.any():
+        return None
+    ant_sup, con_sup, joint = _supports(layout, transactions, settings)
+    # Both sides must exist before the metrics mean anything.
+    present = layout.usable & (ant_sup > 0) & (con_sup > 0)
+    return ant_sup, con_sup, joint, metrics(joint, ant_sup, con_sup), present
+
+
+def fill_lift_and_conviction(measured, out):
+    """Write lift and conviction from measure_rules into out; NaN where undefined."""
+    for values in out:
+        values[:] = np.nan
+    if measured is None:
+        return
+    _, con_sup, _, (_, lift, _, conviction), present = measured
+    out[0][present] = lift[present]
+    # A universal consequent gives undefined conviction (0/0).
+    defined = present & (con_sup < 1)
+    out[1][defined] = conviction[defined]
+
+
 def survives_shuffle(layout, transactions, settings, *, metrics_out=None):
     """Which rules still pass their own thresholds here. Each judged by its own kind."""
-    held = np.zeros(len(layout.usable))
+    measured = measure_rules(layout, transactions, settings)
     if metrics_out is not None:
-        for values in metrics_out:
-            values[:] = np.nan
-    # Nothing usable means nothing was measured, so nothing to read off.
-    if transactions.size == 0 or not layout.usable.any():
-        return held
-
-    n = transactions.shape[0]
-    ant_sup, con_sup, joint = _supports(layout, transactions, settings)
-
-    # Both sides must exist before the thresholds mean anything.
-    testable = layout.usable & (ant_sup > 0) & (con_sup > 0)
-    if not testable.any():
+        fill_lift_and_conviction(measured, metrics_out)
+    held = np.zeros(len(layout.usable))
+    if measured is None or not measured[-1].any():
         return held
 
     # Each rule takes its own judge's answer. Attraction-only settings may leave the
     # avoidance thresholds unset, so avoidance is judged only when it was searched.
-    measures = metrics(joint, ant_sup, con_sup)
-    if metrics_out is not None:
-        metrics_out[0][testable] = measures[1][testable]
-        # A universal consequent gives undefined conviction (0/0).
-        defined_conviction = testable & (con_sup < 1)
-        metrics_out[1][defined_conviction] = measures[3][defined_conviction]
+    ant_sup, con_sup, joint, measures, present = measured
+    n = transactions.shape[0]
     judged = attracts(settings, joint, ant_sup, con_sup, measures, n)
     if settings.include_avoidance_rules:
         judged = np.where(layout.avoiding,
                           avoids(settings, joint, ant_sup, con_sup, measures, n), judged)
-    held[testable] = judged[testable]
+    held[present] = judged[present]
     return held
 
 

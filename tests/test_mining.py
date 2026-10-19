@@ -350,13 +350,13 @@ def test_same_seed_gives_the_same_p_values():
 
     first = result.add_p_values(n_shuffles=10, random_seed=99)
     second = result.add_p_values(n_shuffles=10, random_seed=99)
-    pd.testing.assert_series_equal(first["p_value"], second["p_value"])
+    pd.testing.assert_series_equal(first["regular_p_value"], second["regular_p_value"])
 
 
 def test_p_values_are_between_zero_and_one():
     coords, labels = grid_tissue()
     tested = mine(coords, labels, base(min_patches=0)).add_p_values(n_shuffles=5, random_seed=1)
-    assert tested["p_value"].between(0, 1).all()
+    assert tested["regular_p_value"].between(0, 1).all()
     assert "p_value_adj" not in tested.columns, "the pipeline must not correct anything"
 
 
@@ -378,7 +378,7 @@ def test_individual_fdr_includes_unmined_candidates_without_changing_raw_p_value
     # Three centers x three neighbors x two kinds, including unmined rules.
     assert 0 < len(raw) < 18
     expected = false_discovery_rates(np.r_[raw, np.ones(18 - len(raw))])[:len(raw)]
-    np.testing.assert_allclose(tested["p_value"], raw)
+    np.testing.assert_allclose(tested["regular_p_value"], raw)
     np.testing.assert_allclose(tested["individual_fdr"], expected)
 
 
@@ -387,7 +387,7 @@ def test_empty_mining_result_has_empty_p_values_and_fdr():
     result = mine(coords, labels, base(min_label_count=len(labels) + 1))
     tested = result.add_p_values(n_shuffles=20, random_seed=1)
     assert tested.empty
-    assert {"p_value", "individual_fdr"} <= set(tested.columns)
+    assert {"regular_p_value", "individual_fdr"} <= set(tested.columns)
 
 
 def test_runner_forwards_fdr_cutoff_and_preserves_raw_p_values(caplog):
@@ -398,14 +398,14 @@ def test_runner_forwards_fdr_cutoff_and_preserves_raw_p_values(caplog):
     expected = mine(coords, labels, settings).add_p_values(n_shuffles=1, random_seed=42)
     result, failure = _run_one(_SampleTask(
         sample_id="FOV1", coords=coords, labels=labels, settings=settings,
-        n_shuffles=1, seed=42, kept_fixed=(), min_lift_gain=None,
-        max_individual_fdr=0.05, min_consequent_conviction_gain=1.1,
-        n_conditional_shuffles=None, calculate_individual_fdr=True,
-        calculate_conditional_fdr=True,
+        n_shuffles=1, seed=42, kept_fixed=(), max_individual_fdr=0.05,
+        n_conditional_shuffles=None, conditional_metric=None, max_conditional_individual_fdr=None,
+        calculate_individual_fdr=True,
+        calculate_conditional_individual_fdr=True,
     ))
     assert failure is None
     assert not result.rules.empty
-    np.testing.assert_allclose(result.rules.p_value, expected.p_value)
+    np.testing.assert_allclose(result.rules.regular_p_value, expected.regular_p_value)
     assert result.rules.individual_fdr.isna().all()
     assert "[FOV1] Insufficient permutation resolution" in caplog.text
 
@@ -473,7 +473,7 @@ def test_attraction_only_rules_can_be_shuffled_without_avoidance_threshold():
     result = mine(coords, labels, base(include_avoidance_rules=False, avoidance_max_lift=None))
     assert not result.rules.empty
     tested = result.add_p_values(n_shuffles=9, random_seed=0, calculate_fdr=False)
-    assert tested.p_value.notna().all()
+    assert tested.regular_p_value.notna().all()
 
 
 def test_unset_thresholds_do_not_filter():
@@ -835,7 +835,7 @@ def test_a_rule_naming_a_missing_cell_type_is_untested_not_perfect():
                             n_shuffles=20, random_seed=1, labels_kept_fixed=())
     assert (p_values == 1.0).all()
     # The real rules still get real p-values, so the fix has not flattened everything.
-    assert result.add_p_values(n_shuffles=20, random_seed=1)["p_value"].min() < 1.0
+    assert result.add_p_values(n_shuffles=20, random_seed=1)["regular_p_value"].min() < 1.0
 
 
 # --- the two weightings are the same code -------------------------------------

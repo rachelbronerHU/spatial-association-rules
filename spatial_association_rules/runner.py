@@ -1,5 +1,5 @@
 """
-Run the same mining over many samples: mine everything, test everything, then filter.
+Run the same mining over many samples: mine everything, then test everything.
 See README, "run_samples".
 """
 
@@ -16,9 +16,8 @@ import numpy as np
 import pandas as pd
 
 from .mine import mine
-from .complex_rules import DEFAULT_IMPROVEMENT_GAIN
-from .rules import classify_rules
-from .validation.conditional import check_shuffle_count
+from .validation.conditional import check_metric, check_shuffle_count
+from .validation.false_discovery import check_fdr_cutoff
 from .validation.permutations import sample_folder
 from .settings import Settings
 from .validation.significance import seed_for
@@ -29,7 +28,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SampleResult:
     sample_id: object
-    rules: pd.DataFrame     # every rule, with raw p-values and classification columns
+    rules: pd.DataFrame     # every rule, with raw p-values
     stats: dict
     comparisons: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
     raw_rules: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
@@ -70,20 +69,20 @@ class _SampleTask:
     n_shuffles: int
     seed: object
     kept_fixed: tuple
-    min_lift_gain: object
     max_individual_fdr: object
-    min_consequent_conviction_gain: object
     n_conditional_shuffles: object
+    conditional_metric: object
+    max_conditional_individual_fdr: object
     calculate_individual_fdr: bool
-    calculate_conditional_fdr: bool
+    calculate_conditional_individual_fdr: bool
     permutation_dir: object = None
 
 
 def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
-                labels_kept_fixed=(), min_lift_gain=DEFAULT_IMPROVEMENT_GAIN, max_individual_fdr=None,
-                min_consequent_conviction_gain=DEFAULT_IMPROVEMENT_GAIN,
-                workers=None, output_path=None, n_conditional_shuffles=None,
-                calculate_individual_fdr=True, calculate_conditional_fdr=True,
+                labels_kept_fixed=(), max_individual_fdr=None, workers=None, output_path=None,
+                n_conditional_shuffles=None, conditional_metric=None,
+                max_conditional_individual_fdr=None, calculate_individual_fdr=True,
+                calculate_conditional_individual_fdr=True,
                 save_permutation_metrics=False) -> RunReport:
     """
     Mine every sample and report what came back, with raw p-values and nothing cut.
@@ -93,16 +92,28 @@ def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
                   guard the caller with `if __name__ == "__main__"`.
                   `None` makes it to run here. 
     output_path:  where to write run_config.json. `None` writes nothing.
-    n_conditional_shuffles: optional extra testing; requires max_individual_fdr.
-    calculate_individual_fdr, calculate_conditional_fdr: whether to correct each test.
+    max_individual_fdr, max_conditional_individual_fdr: warn when too few shuffles can
+                  reach these FDRs.
+    n_conditional_shuffles: shuffles for the conditional test of complex rules; None skips it.
+    conditional_metric: "lift", "conviction", or None to choose by the rule's complex side.
+    calculate_individual_fdr, calculate_conditional_individual_fdr: whether to correct
+                  each test.
     save_permutation_metrics: save per-sample shuffle arrays; requires output_path.
 
     A sample that raises lands in report.failures. If every sample fails, this raises.
     """
-    if not isinstance(calculate_individual_fdr, bool) or not isinstance(calculate_conditional_fdr, bool):
-        raise ValueError("calculate_individual_fdr and calculate_conditional_fdr must be bools")
+    if not all(isinstance(value, bool)
+               for value in (calculate_individual_fdr, calculate_conditional_individual_fdr)):
+        raise ValueError("calculate_individual_fdr and calculate_conditional_individual_fdr "
+                         "must be bools")
+    check_fdr_cutoff(max_individual_fdr, "max_individual_fdr")
+    check_fdr_cutoff(max_conditional_individual_fdr, "max_conditional_individual_fdr")
     if not calculate_individual_fdr and max_individual_fdr is not None:
         raise ValueError("max_individual_fdr requires calculate_individual_fdr=True")
+    if not calculate_conditional_individual_fdr and max_conditional_individual_fdr is not None:
+        raise ValueError("max_conditional_individual_fdr requires "
+                         "calculate_conditional_individual_fdr=True")
+    check_metric(conditional_metric)
     if not isinstance(save_permutation_metrics, bool):
         raise ValueError("save_permutation_metrics must be a bool")
     if save_permutation_metrics and output_path is None:
@@ -112,20 +123,17 @@ def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
     if n_conditional_shuffles is not None:
         check_shuffle_count(n_conditional_shuffles, "n_conditional_shuffles")
         n_conditional_shuffles = int(n_conditional_shuffles)
-        if max_individual_fdr is None or not 0 < max_individual_fdr <= 1:
-            raise ValueError("conditional tests require max_individual_fdr in (0, 1]")
     setup_console_logging()
     permutation_dir = os.path.join(output_path, "permutations") if save_permutation_metrics else None
     tasks = [
         _SampleTask(
             sample_id=sample_id, coords=coords, labels=labels, settings=settings,
             n_shuffles=n_shuffles, seed=seed_for(random_seed, sample_id),
-            kept_fixed=tuple(labels_kept_fixed), min_lift_gain=min_lift_gain,
-            max_individual_fdr=max_individual_fdr,
-            min_consequent_conviction_gain=min_consequent_conviction_gain,
-            n_conditional_shuffles=n_conditional_shuffles,
+            kept_fixed=tuple(labels_kept_fixed), max_individual_fdr=max_individual_fdr,
+            n_conditional_shuffles=n_conditional_shuffles, conditional_metric=conditional_metric,
+            max_conditional_individual_fdr=max_conditional_individual_fdr,
             calculate_individual_fdr=calculate_individual_fdr,
-            calculate_conditional_fdr=calculate_conditional_fdr,
+            calculate_conditional_individual_fdr=calculate_conditional_individual_fdr,
             permutation_dir=permutation_dir,
         )
         for sample_id, coords, labels in samples
@@ -138,11 +146,11 @@ def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
     if output_path is not None:
         _save_config(output_path, settings, dict(
             n_shuffles=n_shuffles, random_seed=random_seed, labels_kept_fixed=list(labels_kept_fixed),
-            min_lift_gain=min_lift_gain, max_individual_fdr=max_individual_fdr, workers=workers,
-            min_consequent_conviction_gain=min_consequent_conviction_gain,
-            n_conditional_shuffles=n_conditional_shuffles,
+            max_individual_fdr=max_individual_fdr, workers=workers,
+            n_conditional_shuffles=n_conditional_shuffles, conditional_metric=conditional_metric,
+            max_conditional_individual_fdr=max_conditional_individual_fdr,
             calculate_individual_fdr=calculate_individual_fdr,
-            calculate_conditional_fdr=calculate_conditional_fdr,
+            calculate_conditional_individual_fdr=calculate_conditional_individual_fdr,
             save_permutation_metrics=save_permutation_metrics,
         ))
 
@@ -185,22 +193,16 @@ def _run_one(task):
         comparisons = pd.DataFrame()
         if task.n_conditional_shuffles is not None:
             tested, comparisons = result.add_conditional_p_values(
-                tested, n_shuffles=task.n_conditional_shuffles,
-                max_individual_fdr=task.max_individual_fdr, random_seed=task.seed,
-                labels_kept_fixed=task.kept_fixed, sample_id=task.sample_id,
-                calculate_fdr=task.calculate_conditional_fdr,
+                tested, n_shuffles=task.n_conditional_shuffles, random_seed=task.seed,
+                labels_kept_fixed=task.kept_fixed, metric=task.conditional_metric,
+                sample_id=task.sample_id, calculate_fdr=task.calculate_conditional_individual_fdr,
+                max_conditional_individual_fdr=task.max_conditional_individual_fdr,
                 permutation_dir=task.permutation_dir,
             )
-        classified = classify_rules(
-            tested, min_lift_gain=task.min_lift_gain,
-            max_individual_fdr=task.max_individual_fdr,
-            min_consequent_conviction_gain=task.min_consequent_conviction_gain,
-        )
 
         logger.info(f"[{task.sample_id}] {result.stats['patches_kept']} transactions, "
-                    f"{len(result.rules)} mined, "
-                    f"{int(classified['adds_information'].sum())} add information")
-        return SampleResult(task.sample_id, classified, result.stats, comparisons,
+                    f"{len(result.rules)} mined")
+        return SampleResult(task.sample_id, tested, result.stats, comparisons,
                             result.raw_rules), None
     except Exception:
         return None, (task.sample_id, traceback.format_exc())

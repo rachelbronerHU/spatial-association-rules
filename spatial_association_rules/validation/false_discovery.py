@@ -15,11 +15,17 @@ from ..rules import count_candidate_rules
 logger = logging.getLogger(__name__)
 
 
-def minimum_shuffles_for_fdr(n_tests, n_rules, max_individual_fdr):
+def check_fdr_cutoff(value, name):
+    """An FDR cutoff is in (0, 1], or None for no cutoff."""
+    if value is not None and not 0 < value <= 1:
+        raise ValueError(f"{name} must be in (0, 1], or None")
+
+
+def minimum_shuffles_for_fdr(n_tests, n_rules, max_fdr):
     """Fewest shuffles that could let any rule pass, assuming all get the best result."""
-    if n_rules == 0 or max_individual_fdr == 1:
+    if n_rules == 0 or max_fdr == 1:
         return 0  # Adjusted values are capped at 1.
-    return max(0, ceil(n_tests / (max_individual_fdr * n_rules)) - 1)
+    return max(0, ceil(n_tests / (max_fdr * n_rules)) - 1)
 
 
 def false_discovery_rates(p_values, n_tests=None):

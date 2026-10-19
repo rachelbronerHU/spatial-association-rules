@@ -1,4 +1,4 @@
-"""Exploratory shuffle tests with each simpler rule's cell types held fixed."""
+"""Shuffle tests for complex rules, with each simpler rule's cell types held fixed."""
 
 import json
 import logging
@@ -6,29 +6,31 @@ import logging
 import numpy as np
 import pandas as pd
 
-from ..complex_rules import _name, _rule_type, simpler_positions
-from ..rules import metrics
+from ..complex_rules import is_one_sided_complex, rule_name, simpler_rules
 from ..transactions import strip_role
-from .false_discovery import fdr_by_size, fdr_families
+from .false_discovery import check_fdr_cutoff, fdr_by_size, fdr_families
 from .permutations import record_permutations
 from .significance import (
-    _adjacency, _encode_labels, _held_fixed, _rule_columns, _supports, _transactions, seed_for,
-    survives_shuffle,
+    _adjacency, _encode_labels, _held_fixed, _rule_columns, _transactions,
+    fill_lift_and_conviction, measure_rules, seed_for,
 )
 
 logger = logging.getLogger(__name__)
 
-PLAN_COLUMNS = ["rule_pos", "simpler_pos", "rule", "simpler_rule", "kind", "metric",
+PLAN_COLUMNS = ["rule_pos", "rule", "simpler_rule", "kind", "metric", "observed",
                 "fixed_types", "movable_cells", "status"]
 
 
-def conditional_test_plan(rules, labels, max_individual_fdr, labels_kept_fixed=()):
-    """List comparisons and distinct fixed-type sets without running any shuffles."""
-    if max_individual_fdr is None or not 0 < max_individual_fdr <= 1:
-        raise ValueError("conditional tests require max_individual_fdr in (0, 1]")
-    required = {"antecedents", "consequents", "kind", "individual_fdr"}
-    if not required.issubset(rules.columns):
-        raise ValueError("pass rules from add_p_values(), including individual_fdr")
+def conditional_test_plan(rules, raw_rules, labels, labels_kept_fixed=(), metric=None):
+    """List the comparisons and their fixed cell types, without shuffling.
+
+    metric: "lift", "conviction", or None for lift on complex antecedents and
+    conviction on complex consequents.
+    """
+    check_metric(metric)
+    needed = {"antecedents", "consequents", "kind"} | ({metric} if metric else {"lift", "conviction"})
+    if not needed.issubset(rules.columns):
+        raise ValueError(f"rules need the columns {sorted(needed)}")
     if not rules["kind"].isin(["attracts", "avoids"]).all():
         raise ValueError("rule kind must be attracts or avoids")
 
@@ -36,71 +38,74 @@ def conditional_test_plan(rules, labels, max_individual_fdr, labels_kept_fixed=(
     patterns = tuple(rules.attrs.get("labels_kept_fixed", ())) + tuple(labels_kept_fixed)
     configured = set(labels[_held_fixed(labels, patterns)])
     available = set(labels)
-    rows = list(rules.itertuples(index=False))
-    types = [set(map(strip_role, tuple(row.antecedents) + tuple(row.consequents))) for row in rows]
-    significant = rules["individual_fdr"].le(max_individual_fdr).fillna(False).to_numpy()
-    masks = {}
+    movable_by_fixed = {}
     comparisons = []
-    for pos, parents in enumerate(simpler_positions(rules)):
-        for parent in parents:
-            if not significant[parent]:
-                continue
-            fixed = tuple(sorted(configured | types[parent]))
-            if fixed not in masks:
+    rows = rules.itertuples(index=False)
+    for pos, (row, simpler) in enumerate(zip(rows, simpler_rules(rules, raw_rules))):
+        rule_types = set(map(strip_role, tuple(row.antecedents) + tuple(row.consequents)))
+        row_metric = metric or ("lift" if len(row.consequents) == 1 else "conviction")
+        observed = getattr(row, row_metric)
+        seen = set()
+        for ants, cons in simpler:
+            fixed = tuple(sorted(configured | set(ants) | set(cons)))
+            if fixed in seen:
+                continue  # Another simpler rule already fixes the same types.
+            seen.add(fixed)
+            if fixed not in movable_by_fixed:
                 movable = ~np.isin(labels, fixed)
-                masks[fixed] = (int(movable.sum()), len(set(labels[movable])) >= 2)
-            movable_cells, can_shuffle = masks[fixed]
+                movable_by_fixed[fixed] = (int(movable.sum()), len(set(labels[movable])) >= 2)
+            movable_cells, can_shuffle = movable_by_fixed[fixed]
             status = "ready"
-            if not types[pos].issubset(available):
+            if not rule_types.issubset(available):
                 status = "missing_cell_type"
-            elif types[pos].issubset(fixed):
+            elif rule_types.issubset(fixed):
                 status = "all_rule_types_fixed"
             elif not can_shuffle:
                 status = "no_exchangeable_labels"
-            row, simpler = rows[pos], rows[parent]
+            elif pd.isna(observed):
+                status = "undefined_metric"
             comparisons.append(dict(
-                rule_pos=pos, simpler_pos=parent,
-                rule=_name(row.antecedents, row.consequents),
-                simpler_rule=_name(simpler.antecedents, simpler.consequents),
-                kind=row.kind, metric="lift" if len(row.consequents) == 1 else "conviction",
-                fixed_types=fixed, movable_cells=movable_cells, status=status,
+                rule_pos=pos, rule=rule_name(row.antecedents, row.consequents),
+                simpler_rule=rule_name(ants, cons), kind=row.kind, metric=row_metric,
+                observed=observed, fixed_types=fixed, movable_cells=movable_cells, status=status,
             ))
     plan = pd.DataFrame(comparisons, columns=PLAN_COLUMNS)
     plan.attrs["shuffle_batches"] = plan.loc[plan.status == "ready", "fixed_types"].nunique()
     return plan
 
 
-def conditional_p_values(rules, patches, labels, settings, *, n_shuffles,
-                         max_individual_fdr, random_seed=None, labels_kept_fixed=(), sample_id="",
-                         calculate_fdr=True, permutation_dir=None):
-    """Count complex rules passing regular thresholds with simpler types fixed.
+def conditional_p_values(rules, raw_rules, patches, labels, settings, *, n_shuffles,
+                         random_seed=None, labels_kept_fixed=(), metric=None, sample_id="",
+                         calculate_fdr=True, max_conditional_individual_fdr=None,
+                         permutation_dir=None):
+    """How often a shuffle makes the complex rule as strong as mined. See DESIGN.md.
 
-    Add comparison p-values, their maximum per rule, and optional FDR.
-    Observed gain is recorded for reference only; it never gates or scores a test.
-
-    These test a restricted random-label null, not Webb's conditional independence.
-    Parents are selected from the same data, so FDR is not proven controlled.
-    Classification is unchanged. See DESIGN.md.
+    Each simpler rule gives one comparison; the rule keeps their largest p-value.
     """
     if not isinstance(calculate_fdr, bool):
         raise ValueError("calculate_fdr must be a bool")
+    check_fdr_cutoff(max_conditional_individual_fdr, "max_conditional_individual_fdr")
+    if not calculate_fdr and max_conditional_individual_fdr is not None:
+        raise ValueError("max_conditional_individual_fdr requires calculate_fdr=True")
     check_shuffle_count(n_shuffles, "n_shuffles")
     labels = np.asarray(labels, dtype=str)
-    plan = conditional_test_plan(rules, labels, max_individual_fdr, labels_kept_fixed)
+    plan = conditional_test_plan(rules, raw_rules, labels, labels_kept_fixed, metric)
     plan["p_value"] = np.nan
-    plan["gain_p_value"] = np.nan
-    plan["observed_gain"] = np.nan
     ids = rules["rule_idx"].to_numpy() if "rule_idx" in rules else np.arange(len(rules))
     batches = 0
     ready = plan.status == "ready"
+    if calculate_fdr:
+        # Only rules with every comparison ready will receive a combined p-value.
+        all_ready = ready.groupby(plan.rule_pos).all()
+        testable_positions = all_ready.index[all_ready.to_numpy(dtype=bool)].to_numpy(dtype=int)
+        families = fdr_families(rules.iloc[testable_positions], labels, settings,
+                                n_shuffles=n_shuffles, max_fdr=max_conditional_individual_fdr,
+                                column="conditional_individual_fdr",
+                                sample_id=sample_id)
     if ready.any():
         cell_labels, item_index = _encode_labels(labels)
         adjacency = _adjacency(patches, len(labels))
-        observed = _measure(_rule_columns(rules, item_index),
-                            _transactions(cell_labels, adjacency, settings), settings)
-        observed_scores = _scores(observed, plan, np.arange(len(rules)))
-        plan.loc[ready, "observed_gain"] = observed_scores[ready]
-        groups = plan[plan.status == "ready"].groupby("fixed_types", sort=True)
+        groups = plan[ready].groupby("fixed_types", sort=True)
         batches = groups.ngroups
         prefix = f"[{sample_id}] " if sample_id else ""
         logger.info(f"{prefix}Conditional tests: {len(plan)} comparisons, "
@@ -108,54 +113,46 @@ def conditional_p_values(rules, patches, labels, settings, *, n_shuffles,
 
         for batch, (fixed, group) in enumerate(groups, 1):
             movable = np.flatnonzero(~np.isin(labels, fixed))
-            positions = np.union1d(group.rule_pos, group.simpler_pos).astype(int)
+            positions = np.unique(group.rule_pos.to_numpy(dtype=int))
             layout = _rule_columns(rules.iloc[positions], item_index)
             rng = np.random.default_rng(seed_for(random_seed, json.dumps(fixed)))
-            survived = np.zeros(len(group), dtype=int)
-            gained = np.zeros(len(group), dtype=int)
-            observed_gain = observed_scores[group.index]
-            children = np.searchsorted(positions, group.rule_pos.to_numpy(dtype=int))
+            column = np.searchsorted(positions, group.rule_pos.to_numpy(dtype=int))
+            uses_conviction = (group.metric == "conviction").to_numpy()
+            observed = group.observed.to_numpy(dtype=float)
+            avoids = (group.kind == "avoids").to_numpy()
+            hits = np.zeros(len(group), dtype=int)
             rule_idx = ids[positions] if permutation_dir is not None else None
-            metrics_out = (np.empty(len(positions)), np.empty(len(positions)))
+            lift, conviction = np.empty(len(positions)), np.empty(len(positions))
             with record_permutations(permutation_dir, n_shuffles, rule_idx, sample_id=sample_id,
                                      test="conditional", fixed_types=fixed, batch=batch) as recorded:
                 for i in range(n_shuffles):
                     order = np.arange(len(labels))
                     order[movable] = rng.permutation(movable)
                     transactions = _transactions(cell_labels[order], adjacency, settings)
-                    passed = survives_shuffle(layout, transactions, settings, metrics_out=metrics_out)
+                    fill_lift_and_conviction(measure_rules(layout, transactions, settings),
+                                             (lift, conviction))
                     if recorded is not None:
-                        recorded["lift"][i] = metrics_out[0]
-                        recorded["conviction"][i] = metrics_out[1]
-                        recorded["passed_mining_filters"][i] = passed
-                    survived += passed[children].astype(int)
-                    # An absent side gives NaN, which never counts. Never discard a permutation.
-                    gain = _scores(np.column_stack(metrics_out), group, positions)
-                    gained += (gain >= observed_gain) | np.isclose(gain, observed_gain, rtol=1e-12, atol=0)
-            plan.loc[group.index, "p_value"] = (survived + 1) / (n_shuffles + 1)
-            plan.loc[group.index, "gain_p_value"] = np.where(
-                np.isnan(observed_gain), np.nan, (gained + 1) / (n_shuffles + 1))
+                        recorded["lift"][i] = lift
+                        recorded["conviction"][i] = conviction
+                    shuffled = np.where(uses_conviction, conviction[column], lift[column])
+                    hits += _as_strong(shuffled, observed, avoids)
+            plan.loc[group.index, "p_value"] = (hits + 1) / (n_shuffles + 1)
             plan.loc[group.index, "status"] = "tested"
             logger.debug(f"{prefix}Conditional batch {batch}/{batches}: fixed {fixed}")
 
     result = _attach_results(rules, plan)
-    fdr_columns = {"conditional_p_value": "conditional_fdr",
-                   "conditional_gain_p_value": "conditional_gain_fdr"}
     if calculate_fdr:
-        for p_column, fdr_column in fdr_columns.items():
-            result[fdr_column] = _conditional_fdr(result, p_column, fdr_column, labels, settings,
-                                                  n_shuffles=n_shuffles, max_fdr=max_individual_fdr,
-                                                  sample_id=sample_id)
+        result["conditional_individual_fdr"] = fdr_by_size(
+            result, result["conditional_p_value"], families)
     else:
-        result.drop(columns=list(fdr_columns.values()), errors="ignore", inplace=True)
+        result.drop(columns="conditional_individual_fdr", errors="ignore", inplace=True)
     result.attrs["conditional_test_summary"] = dict(
         comparisons=len(plan), shuffle_batches=batches, n_shuffles=n_shuffles,
         shuffled_tissues=batches * n_shuffles,
     )
     # Report stored rule ids, so comparisons still match after rules are filtered or sorted.
-    comparisons = plan.rename(columns={"rule_pos": "rule_idx", "simpler_pos": "simpler_idx"})
+    comparisons = plan.rename(columns={"rule_pos": "rule_idx"})
     comparisons["rule_idx"] = ids[plan.rule_pos.to_numpy(dtype=int)]
-    comparisons["simpler_idx"] = ids[plan.simpler_pos.to_numpy(dtype=int)]
     return result, comparisons
 
 
@@ -165,68 +162,37 @@ def check_shuffle_count(value, name):
         raise ValueError(f"{name} must be a positive integer")
 
 
-def _conditional_fdr(rules, p_column, fdr_column, labels, settings, *, n_shuffles, max_fdr,
-                     sample_id=""):
-    """Correct each size over all candidates, as individual_fdr does; untested rows stay NaN.
-
-    Mixed rules are candidates too, although never tested, so they count as p=1.
-    """
-    p_values = rules[p_column]
-    families = fdr_families(rules[p_values.notna()], labels, settings, n_shuffles=n_shuffles,
-                            max_fdr=max_fdr, column=fdr_column, sample_id=sample_id)
-    return fdr_by_size(rules, p_values, families)
+def check_metric(metric):
+    """Shared by the runner, so bad input fails before any sample is mined."""
+    if metric not in (None, "lift", "conviction"):
+        raise ValueError("metric must be 'lift', 'conviction', or None")
 
 
-def _measure(layout, transactions, settings):
-    """Lift and conviction; undefined metrics stay missing."""
-    values = np.full((len(layout.usable), 2), np.nan)
-    if not len(transactions):
-        return values
-    ant, con, joint = _supports(layout, transactions, settings)
-    _, lift, _, conviction = metrics(joint, ant, con)
-    usable = layout.usable & (ant > 0) & (con > 0)
-    values[usable, 0] = lift[usable]
-    # A universal consequent gives conviction 0/0, not evidence of certainty.
-    usable_con = usable & (con < 1)
-    values[usable_con, 1] = conviction[usable_con]
-    return values
-
-
-def _scores(values, comparisons, positions):
-    """Gain ratios in the complex rule's direction; equal zeros or infinities tie."""
-    child = np.searchsorted(positions, comparisons.rule_pos.to_numpy(dtype=int))
-    parent = np.searchsorted(positions, comparisons.simpler_pos.to_numpy(dtype=int))
-    metric = (comparisons.metric == "conviction").to_numpy(dtype=int)
-    complex_value, simpler_value = values[child, metric], values[parent, metric]
-    avoids = (comparisons.kind == "avoids").to_numpy()
-    numerator = np.where(avoids, simpler_value, complex_value)
-    denominator = np.where(avoids, complex_value, simpler_value)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        scores = numerator / denominator
-    return np.where(numerator == denominator, 1.0, scores)
+def _as_strong(shuffled, observed, avoids):
+    """As high as observed for attraction, as low for avoidance. Ties count; NaN never does."""
+    tied = np.isclose(shuffled, observed, rtol=1e-12, atol=0)
+    return np.where(avoids, shuffled <= observed, shuffled >= observed) | tied
 
 
 def _attach_results(rules, plan):
+    """Add each rule's largest comparison p-value and a status saying why it may be missing."""
     result = rules.copy()
     by_rule = {pos: group for pos, group in plan.groupby("rule_pos")}
-    p_values, gain_p_values, statuses = [], [], []
+    p_values, statuses = [], []
     for pos, row in enumerate(rules.itertuples(index=False)):
         comparisons = by_rule.get(pos)
-        p_value = gain_p_value = np.nan
-        if _rule_type(len(row.antecedents), len(row.consequents)) in ("pairwise", "complex-mixed"):
+        p_value = np.nan
+        if not is_one_sided_complex(row.antecedents, row.consequents):
             status = "not_applicable"
         elif comparisons is None:
-            status = "no_significant_simpler"
+            status = "no_simpler"
         elif comparisons["p_value"].isna().any():
             status = "untestable"
         else:
             p_value = comparisons["p_value"].max()
-            gain_p_value = comparisons["gain_p_value"].max(skipna=False)
             status = "tested"
         p_values.append(p_value)
-        gain_p_values.append(gain_p_value)
         statuses.append(status)
     result["conditional_p_value"] = pd.Series(p_values, index=result.index, dtype=float)
-    result["conditional_gain_p_value"] = pd.Series(gain_p_values, index=result.index, dtype=float)
     result["conditional_status"] = pd.Series(statuses, index=result.index, dtype=object)
     return result
