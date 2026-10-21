@@ -1009,6 +1009,19 @@ def test_rule_splits_respect_the_complexity_flag(one_sided, expected):
     assert any(len(ant) > 1 and len(con) > 1 for ant, con in splits) == (not one_sided)
 
 
+def test_splits_leave_out_a_type_twice_on_one_side():
+    itemset = frozenset(["A_CENTER", "A_NEIGHBOR", "B_NEIGHBOR"])
+    splits = {(tuple(sorted(ant)), tuple(sorted(con))) for ant, con in splits_of(itemset)}
+    assert splits == {(("A_CENTER",), ("A_NEIGHBOR", "B_NEIGHBOR")),
+                      (("A_CENTER", "B_NEIGHBOR"), ("A_NEIGHBOR",))}
+
+
+def test_a_center_never_grows_a_neighbor_of_its_own_type():
+    sides = [("A_CENTER", ()), (None, ("A_NEIGHBOR",))]
+    grown = set(extend(sides, ["A_NEIGHBOR", "B_NEIGHBOR"]))
+    assert grown == {("A_CENTER", ("B_NEIGHBOR",)), (None, ("A_NEIGHBOR", "B_NEIGHBOR"))}
+
+
 @pytest.mark.parametrize("value", [None, 0, 1, "false"])
 def test_complexity_flag_requires_a_boolean(value):
     with pytest.raises(ValueError, match="one_sided_complex_rules"):

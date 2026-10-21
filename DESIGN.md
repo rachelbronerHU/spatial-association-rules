@@ -54,6 +54,8 @@ That leaves:
   items, since the other side needs one
 - a center seeds a side and only neighbors extend it, so **no side ever holds two
   centers** — a patch has one center, so those could only ever measure zero
+- no side holds a type twice (`X_CENTER + X_NEIGHBOR`); attraction leaves these splits
+  out too. A type may still appear on both sides (`X_CENTER -> X_NEIGHBOR`)
 - pairing walks the consequents most-common-first and stops as soon as one is too rare
   for the antecedent in hand
 
@@ -180,8 +182,8 @@ the searches measured, of either kind, before the final thresholds, so no thresh
 or FDR decides which simpler rules count.
 
 Matching ignores `_CENTER` and `_NEIGHBOR` but keeps the sides and repeated types.
-So `Paneth_CENTER + Paneth_NEIGHBOR -> Epithelial_NEIGHBOR` matches
-`Paneth -> Epithelial`. Simpler rules that fix the same cell types are one comparison.
+So `Fibroblast_NEIGHBOR + Paneth_CENTER -> Paneth_NEIGHBOR` matches
+`Paneth -> Paneth`. Simpler rules that fix the same cell types are one comparison.
 
 Every valid simpler rule of a mined complex rule is in `raw_rules`. For attraction,
 its itemset is part of a frequent itemset. For avoidance, a shorter side is at least
@@ -214,9 +216,9 @@ the crowding filter. A missing side, or a universal consequent for conviction, m
 the value undefined; such a shuffle never counts but stays in the denominator.
 
 A comparison is untestable when all the rule's types are fixed, a type is missing,
-fewer than two movable labels remain, or the mined metric is missing. Repeated types
-can cause the first: fixing Paneth and Epithelial fixes all of
-`Paneth_CENTER + Paneth_NEIGHBOR -> Epithelial_NEIGHBOR`.
+fewer than two movable labels remain, or the mined metric is missing. A type on both
+sides can cause the first: fixing Fibroblast and Paneth fixes all of
+`Fibroblast_NEIGHBOR + Paneth_CENTER -> Paneth_NEIGHBOR`.
 
 ### Combining and correcting
 

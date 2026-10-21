@@ -194,6 +194,12 @@ def metrics(support, ant_support, con_support):
 
 # --- from itemset to rule --------------------------------------------------
 
+def has_a_type_twice(side):
+    """X_CENTER and X_NEIGHBOR on one side, which both searches leave out."""
+    types = [strip_role(item) for item in side]
+    return len(set(types)) < len(types)
+
+
 def splits_of(itemset, one_sided_complex_rules=True):
     """Allowed (antecedent, consequent) splits, with the center on the left."""
     for size in range(1, len(itemset)):
@@ -205,6 +211,8 @@ def splits_of(itemset, one_sided_complex_rules=True):
             if any(is_center(item) for item in consequent):
                 continue
             if not any(is_center(item) for item in antecedent):
+                continue
+            if has_a_type_twice(antecedent):
                 continue
             yield antecedent, consequent
 

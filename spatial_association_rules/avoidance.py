@@ -6,7 +6,7 @@ import logging
 
 import numpy as np
 
-from .rules import AVOIDS, frame_of, rules_from, support_of_many
+from .rules import AVOIDS, frame_of, has_a_type_twice, rules_from, support_of_many
 from .transactions import is_center
 
 logger = logging.getLogger(__name__)
@@ -71,11 +71,15 @@ def extend(sides, neighbors):
     Only the neighbors are kept in order, never the center — so a center that sorts
     late (Muscle_CENTER) can still be joined by a neighbor that sorts early
     (Epithelial_NEIGHBOR), and no side can ever collect a second center.
+    A center is never joined by a neighbor of its own type.
     """
     for center, so_far in sides:
         for item in neighbors:
-            if not so_far or item > so_far[-1]:
-                yield center, so_far + (item,)
+            if so_far and item <= so_far[-1]:
+                continue
+            if center is not None and has_a_type_twice((center, item)):
+                continue
+            yield center, so_far + (item,)
 
 
 def supports_of(sides, matrix, item_index):
