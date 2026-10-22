@@ -37,7 +37,8 @@ def test_runner_returns_tested_rules_and_records_steps(monkeypatch, tmp_path):
     monkeypatch.setattr(runner, "mine", lambda *args, **kwargs: result)
     settings = Settings(weighting=Weighting.BINARY, method=Method.CN, radius=1,
                         min_support=0.1, min_lift=1.2, max_items_per_rule=4,
-                        include_avoidance_rules=False, one_sided_complex_rules=False)
+                        include_avoidance_rules=False, one_sided_complex_rules=False,
+                        avoidance_min_expected_support=0.01, avoidance_max_confidence=0.5)
     report = runner.run_samples([("sample", [], [])], settings, n_shuffles=0, output_path=tmp_path)
     assert not report.failures
     assert report.rules().regular_p_value.tolist() == [0.1]
@@ -45,6 +46,8 @@ def test_runner_returns_tested_rules_and_records_steps(monkeypatch, tmp_path):
     config = json.loads((tmp_path / "run_config.json").read_text())
     assert "min_lift_gain" not in config["steps"]
     assert config["settings"]["one_sided_complex_rules"] is False
+    assert config["settings"]["avoidance_min_expected_support"] == 0.01
+    assert config["settings"]["avoidance_max_confidence"] == 0.5
 
 
 def test_runner_can_add_conditional_tests_and_records_the_budget(monkeypatch, tmp_path):

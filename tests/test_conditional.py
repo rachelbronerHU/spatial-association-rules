@@ -159,6 +159,7 @@ def test_p_value_matches_explicit_patch_arithmetic(monkeypatch, weighting, conse
 @pytest.mark.parametrize("changes", [
     {"min_lift": 3}, {"min_support": 0.3}, {"min_patches": 2}, {"min_confidence": 0.9},
     {"min_leverage": 0.08}, {"min_conviction": 3}, {"avoidance_min_expected_meetings": 1},
+    {"avoidance_min_expected_support": 0.3}, {"avoidance_max_confidence": 0.0},
 ])
 def test_mining_thresholds_do_not_change_the_p_value(monkeypatch, changes):
     result, rules = sample(Weighting.WEIGHTED)

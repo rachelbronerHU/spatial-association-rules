@@ -57,6 +57,8 @@ class Settings:
     avoidance_max_lift: Optional[float] = None      # what counts as avoidance. < 1
     avoidance_max_leverage: Optional[float] = None
     avoidance_min_expected_meetings: int = 10       # meetings expected before a miss counts
+    avoidance_min_expected_support: Optional[float] = None  # expected meetings / patches
+    avoidance_max_confidence: Optional[float] = None
 
     min_label_count: Optional[int] = None  # drop rules naming a label this rare
     min_label_share: Optional[float] = None
@@ -90,6 +92,10 @@ class Settings:
              f"avoidance_max_leverage must be <= 0, got {self.avoidance_max_leverage}"),
             (self.avoidance_min_expected_meetings > 0,
              f"avoidance_min_expected_meetings must be > 0, got {self.avoidance_min_expected_meetings}"),
+            (self.avoidance_min_expected_support is None or 0 < self.avoidance_min_expected_support < 1,
+             f"avoidance_min_expected_support must be in (0, 1), got {self.avoidance_min_expected_support}"),
+            (self.avoidance_max_confidence is None or 0 <= self.avoidance_max_confidence <= 1,
+             f"avoidance_max_confidence must be in [0, 1], got {self.avoidance_max_confidence}"),
             (2 <= self.max_items_per_rule <= LONGEST_RULE,
              f"max_items_per_rule must be between 2 and {LONGEST_RULE}, got {self.max_items_per_rule}"),
         ]

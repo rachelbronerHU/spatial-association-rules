@@ -25,8 +25,9 @@ rare cell type can be the center of an avoidance rule at all.
 expected meetings = ant_support x con_support x n  <=  ant_support x n = the patch count
 ```
 
-The expected-meetings check therefore covers the patch check unless
-`min_patches > avoidance_min_expected_meetings`. Each still catches what the other
+The expected-meetings floor is the larger of `avoidance_min_expected_meetings` and
+`avoidance_min_expected_support * n` (when set). It therefore covers the patch check
+unless `min_patches` exceeds that floor. Each still catches what the other
 cannot: few patches with a very common neighbor has the meetings but no rate worth
 measuring; many patches with a very rare neighbor has the rate but nothing to deplete.
 
@@ -43,7 +44,7 @@ one item at a time and measured a level at a time, then paired.
 expected meetings = ant_support x con_support x n,   and neither share exceeds 1
 ```
 
-So each side alone must clear `avoidance_min_expected_meetings / n`, and an antecedent
+So each side alone must clear the expected-meetings floor divided by `n`, and an antecedent
 must also clear `min_patches / n`. A side is never more common than the shorter side it
 grew from, so one that fails is dropped and never grown again — the whole branch above
 it goes with it.

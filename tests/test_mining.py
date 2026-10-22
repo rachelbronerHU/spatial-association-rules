@@ -75,7 +75,8 @@ def base(**changes):
                         max_items_per_rule=2,
                         min_cells_per_patch=2, max_one_type_share=1.0, min_patches=0,
                         include_avoidance_rules=True, avoidance_max_lift=0.999,
-                        avoidance_min_expected_meetings=1)
+                        avoidance_min_expected_meetings=1,
+                        avoidance_min_expected_support=None, avoidance_max_confidence=None)
     return settings.replace(**changes) if changes else settings
 
 
@@ -447,6 +448,10 @@ def test_resolution_check_includes_rules_from_relaxed_high_confidence_support(mo
     {"avoidance_max_leverage": 0.5},       # not below 0, so not avoidance
     {"min_lift": 0.8},                     # below 1, so not attraction
     {"avoidance_min_expected_meetings": 0},
+    {"avoidance_min_expected_support": 0},
+    {"avoidance_min_expected_support": 1},
+    {"avoidance_max_confidence": -0.1},
+    {"avoidance_max_confidence": 1.1},
 ])
 def test_settings_reject_impossible_values(bad):
     with pytest.raises(ValueError):
@@ -579,6 +584,53 @@ def test_a_rate_measured_on_too_few_patches_is_not_a_finding():
 
     strict = filtered_rules(transactions, settings.replace(min_patches=10))
     assert not ((strict["antecedents"] == ("C_CENTER",)).any())
+
+
+@pytest.mark.parametrize("weighting", list(Weighting))
+@pytest.mark.parametrize("n, absolute, fraction, expected", [
+    (100, 30, None, False),
+    (100, 30, 0.20, False),   # 25 expected meetings: the absolute floor wins.
+    (400, 30, 0.30, False),   # 100 expected meetings: the proportional floor wins.
+    (100, 20, 0.25, True),    # Equality passes; the floors are not added together.
+    (400, 30, 0.25, True),
+])
+def test_avoidance_uses_the_larger_expected_meetings_floor(weighting, n, absolute, fraction, expected):
+    transactions = apart(n)
+    settings = base(weighting=weighting, avoidance_min_expected_meetings=absolute,
+                    avoidance_min_expected_support=fraction)
+    rules = filtered_rules(transactions, settings)
+    target = (rules["antecedents"] == ("A_CENTER",)) & (rules["consequents"] == ("D_NEIGHBOR",))
+    assert target.any() == expected
+
+    # A previously mined rule must face the same floor during permutation testing.
+    reference = filtered_rules(transactions, base(weighting=weighting))
+    reference = reference[(reference["antecedents"] == ("A_CENTER",))
+                          & (reference["consequents"] == ("D_NEIGHBOR",))]
+    matrix, item_index = weight_matrix(transactions)
+    assert survives_shuffle(_rule_columns(reference, item_index), matrix, settings).tolist() == [expected]
+
+
+@pytest.mark.parametrize("weighting", list(Weighting))
+@pytest.mark.parametrize("cap, expected", [(None, True), (0.8, True), (0.79, False), (0.0, False)])
+def test_avoidance_max_confidence_is_inclusive_and_does_not_filter_attraction(weighting, cap, expected):
+    transactions = ([binary("A_CENTER", "B_NEIGHBOR")] * 40
+                    + [binary("A_CENTER", "C_NEIGHBOR")] * 10
+                    + [binary("D_CENTER", "B_NEIGHBOR")] * 50)
+    settings = base(weighting=weighting, avoidance_min_expected_meetings=5,
+                    avoidance_max_lift=0.9)
+    original = filtered_rules(transactions, settings)
+    settings = settings.replace(avoidance_max_confidence=cap)
+    rules = filtered_rules(transactions, settings)
+    target = (rules["antecedents"] == ("A_CENTER",)) & (rules["consequents"] == ("B_NEIGHBOR",))
+    assert target.any() == expected  # Confidence is 40 / 50 = 0.8.
+    assert rule_named(rules, ("D_CENTER",), ("C_NEIGHBOR",))["confidence"] == 0.0
+    pd.testing.assert_frame_equal(original[original["kind"] == "attracts"].reset_index(drop=True),
+                                  rules[rules["kind"] == "attracts"].reset_index(drop=True))
+
+    reference = original[(original["antecedents"] == ("A_CENTER",))
+                          & (original["consequents"] == ("B_NEIGHBOR",))]
+    matrix, item_index = weight_matrix(transactions)
+    assert survives_shuffle(_rule_columns(reference, item_index), matrix, settings).tolist() == [expected]
 
 
 def test_a_rare_cell_type_can_still_be_the_centre():
@@ -768,7 +820,9 @@ def brute_force_avoidance(transactions, settings):
     return found
 
 
-def test_the_prefilter_cannot_change_which_rules_come_out():
+@pytest.mark.parametrize("expected_support", [None, 0.05, 0.10])
+@pytest.mark.parametrize("max_confidence", [None, 0.3])
+def test_the_prefilter_cannot_change_which_rules_come_out(expected_support, max_confidence):
     """
     The prefilters only save work. The rules must be the ones brute force finds.
 
@@ -782,7 +836,9 @@ def test_the_prefilter_cannot_change_which_rules_come_out():
                     + [binary("D_CENTER", "B_NEIGHBOR")] * 25
                     + [binary("D_CENTER", "E_NEIGHBOR")] * 3)
     settings = base(min_support=0.05, max_items_per_rule=3,
-                    min_patches=10, avoidance_min_expected_meetings=5)
+                    min_patches=10, avoidance_min_expected_meetings=5,
+                    avoidance_min_expected_support=expected_support,
+                    avoidance_max_confidence=max_confidence)
 
     mined = filtered_rules(transactions, settings)
     mined = mined[mined["kind"] == "avoids"]

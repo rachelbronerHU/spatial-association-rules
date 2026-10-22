@@ -169,6 +169,8 @@ threshold set to `None` is not applied.
 | `include_avoidance_rules` | | search for cell types that keep apart too. On by default |
 | `avoidance_max_leverage` | | tighten avoidance further |
 | `avoidance_min_expected_meetings` | | meetings that had to be expected before a miss counts. Default 10 ([why](DESIGN.md#why-expected-meetings-not-a-support-bar)) |
+| `avoidance_min_expected_support` | | minimum expected fraction `support(A) * support(B)`, in `(0, 1)`. Combined with the absolute meetings floor using `max`. Default `None` |
+| `avoidance_max_confidence` | | maximum `P(B given A)`, in `[0, 1]`, inclusive. Default `None` |
 | `min_label_count`, `min_label_share` | | ignore rules naming a label this rare in the sample |
 
 ### add_p_values
@@ -323,8 +325,9 @@ instead. A rule must:
 - have **no joint-support requirement**
 - have enough patches holding the antecedent to measure a rate on (`min_patches`)
 - have had enough meetings expected that seeing none is surprising
-  (`avoidance_min_expected_meetings`)
-- then clear `avoidance_max_lift`, plus `avoidance_max_leverage` if set
+  (`avoidance_min_expected_meetings`), or the proportional floor
+  (`avoidance_min_expected_support * n_patches`) if larger
+- then clear `avoidance_max_lift`, plus `avoidance_max_leverage` / `avoidance_max_confidence` if set
 
 Why avoidance is measured this way:
 [expected meetings, not a support bar](DESIGN.md#why-expected-meetings-not-a-support-bar).

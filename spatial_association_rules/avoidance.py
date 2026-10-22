@@ -12,26 +12,34 @@ from .transactions import is_center
 logger = logging.getLogger(__name__)
 
 
+def expected_meetings_floor(settings, n_transactions):
+    """The larger of the absolute and proportional expected-meetings floors."""
+    return max(settings.avoidance_min_expected_meetings,
+               (settings.avoidance_min_expected_support or 0.0) * n_transactions)
+
+
 def enough_to_judge_avoidance(settings, ant_support, con_support, n_transactions):
     """Enough patches to measure a rate on, and enough expected meetings to miss."""
     return ((ant_support * n_transactions >= settings.min_patches)
-            & (ant_support * con_support * n_transactions >= settings.avoidance_min_expected_meetings))
+            & (ant_support * con_support * n_transactions >= expected_meetings_floor(settings, n_transactions)))
 
 
-def is_weak_enough(settings, lift, leverage):
+def is_weak_enough(settings, confidence, lift, leverage):
     """The avoidance thresholds."""
     weak = lift <= settings.avoidance_max_lift
     if settings.avoidance_max_leverage is not None:
         weak = weak & (leverage <= settings.avoidance_max_leverage)
+    if settings.avoidance_max_confidence is not None:
+        weak = weak & (confidence <= settings.avoidance_max_confidence)
     return weak
 
 
 def avoids(settings, support, ant_support, con_support, measures, n_transactions):
     """Do these cell types clearly keep apart? Same signature as attracts()."""
-    _, lift, leverage, _ = measures
+    confidence, lift, leverage, _ = measures
     return ((lift < 1.0)
             & enough_to_judge_avoidance(settings, ant_support, con_support, n_transactions)
-            & is_weak_enough(settings, lift, leverage))
+            & is_weak_enough(settings, confidence, lift, leverage))
 
 
 def items_worth_combining(matrix, item_index, settings, n_transactions):
@@ -46,7 +54,7 @@ def items_worth_combining(matrix, item_index, settings, n_transactions):
     if matrix.size == 0:
         return [], {}
 
-    bar = settings.avoidance_min_expected_meetings / n_transactions
+    bar = expected_meetings_floor(settings, n_transactions) / n_transactions
     supports = matrix.sum(axis=0) / n_transactions
     kept = sorted(item for item, column in item_index.items() if supports[column] >= bar)
     return kept, {item: float(supports[item_index[item]]) for item in kept}
@@ -119,7 +127,7 @@ def sides_worth_pairing(matrix, item_index, settings, n_transactions):
     """
     items, single_supports = items_worth_combining(matrix, item_index, settings, n_transactions)
     centers, neighbors = by_role(items)
-    bar = settings.avoidance_min_expected_meetings / n_transactions
+    bar = expected_meetings_floor(settings, n_transactions) / n_transactions
     center_bar = max(bar, settings.min_patches / n_transactions)
 
     # Level one is single items, and items_worth_combining has already measured them.
@@ -159,7 +167,7 @@ def mine_avoidance(matrix, item_index, settings, sample_id: str = ""):
                           for side, support in sides.items() if side[0] is None and support > 0),
                          key=lambda pair: -pair[1])  # most common first, so the pairing stops early
 
-    floor = settings.avoidance_min_expected_meetings
+    floor = expected_meetings_floor(settings, n)
     pairs = []
     for ant_items, ant_support in antecedents:
         needed = floor / (ant_support * n)
