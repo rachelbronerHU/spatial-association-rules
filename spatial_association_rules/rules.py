@@ -194,14 +194,16 @@ def metrics(support, ant_support, con_support):
 
 # --- from itemset to rule --------------------------------------------------
 
-def has_a_type_twice(side):
-    """X_CENTER and X_NEIGHBOR on one side, which both searches leave out."""
-    types = [strip_role(item) for item in side]
+def has_a_type_twice(items):
+    """Whether any cell type appears more than once, ignoring roles."""
+    types = [strip_role(item) for item in items]
     return len(set(types)) < len(types)
 
 
 def splits_of(itemset, one_sided_complex_rules=True):
     """Allowed (antecedent, consequent) splits, with the center on the left."""
+    if len(itemset) > 2 and has_a_type_twice(itemset):
+        return
     for size in range(1, len(itemset)):
         if one_sided_complex_rules and size > 1 and len(itemset) - size > 1:
             continue
@@ -211,8 +213,6 @@ def splits_of(itemset, one_sided_complex_rules=True):
             if any(is_center(item) for item in consequent):
                 continue
             if not any(is_center(item) for item in antecedent):
-                continue
-            if has_a_type_twice(antecedent):
                 continue
             yield antecedent, consequent
 
@@ -290,7 +290,8 @@ def count_candidate_rules(labels, settings, n_items=None):
         splits = 2**r - 1
         if settings.one_sided_complex_rules and r > 1:
             splits = r + 1
-        per_center += comb(n_labels, r) * splits
+        # Pairwise rules may name the center's type again; complex rules may not.
+        per_center += comb(n_labels if r == 1 else n_labels - 1, r) * splits
     n_kinds = 2 if settings.include_avoidance_rules else 1
     return n_labels * per_center * n_kinds
 

@@ -218,9 +218,9 @@ def test_two_parents_use_separate_batches_and_combine_with_max():
     assert len(details) == 2
     assert details.status.tolist() == ["tested", "tested"]
     assert tested.conditional_p_value.iloc[-1] == details.p_value.max()
-    # Four labels give 4 * C(4, 2) * 3 splits * 2 kinds = 144 candidates.
+    # Four labels give 4 * C(3, 2) * 3 splits * 2 kinds = 72 candidates.
     p_value = tested.conditional_p_value.iloc[-1]
-    assert tested.conditional_individual_fdr.iloc[-1] == min(1, 144 * p_value)
+    assert tested.conditional_individual_fdr.iloc[-1] == min(1, 72 * p_value)
     assert tested.conditional_individual_fdr.iloc[:-1].isna().all()
     assert tested.attrs["conditional_test_summary"]["shuffled_tissues"] == 78
 
@@ -274,7 +274,7 @@ def test_all_simpler_combinations_are_tested_without_raw_or_mined_parents(conseq
 
 @pytest.mark.parametrize("case,statuses", [
     ("configured", ["all_rule_types_fixed", "ready"]),
-    ("repeated", ["all_rule_types_fixed"]),
+    ("all_fixed", ["all_rule_types_fixed"]),
     ("one_label", ["no_exchangeable_labels"] * 2),
     ("missing", ["missing_cell_type"] * 2),
     ("undefined", ["undefined_metric"] * 2),
@@ -283,8 +283,8 @@ def test_impossible_comparisons_are_missing_not_significant(case, statuses):
     result, rules = sample()
     if case == "configured":
         rules.attrs["labels_kept_fixed"] = ("B",)
-    elif case == "repeated":
-        rules.at[1, "antecedents"] = ("A_CENTER", "A_NEIGHBOR")
+    elif case == "all_fixed":
+        rules.attrs["labels_kept_fixed"] = ("A", "B", "C")
     elif case == "one_label":
         result.labels[7:10] = "B"
     elif case == "missing":
@@ -392,11 +392,13 @@ def test_invalid_options_are_rejected(options, match):
 
 def test_simpler_rules_fixing_the_same_types_are_one_comparison():
     result, rules = sample()
-    rules.at[1, "antecedents"] = ("A_CENTER", "A_NEIGHBOR", "B_NEIGHBOR")
-    # A -> C and A + A -> C both fix A and C.
+    rules.at[1, "antecedents"] = ("A_CENTER", "B_NEIGHBOR", "D_NEIGHBOR")
+    rules.attrs["labels_kept_fixed"] = ("B",)
+    # A -> C and A + B -> C both fix A, B, and C.
     plan = result.conditional_test_plan(rules)
-    assert plan.fixed_types.tolist() == [("A", "C"), ("B", "C"), ("A", "B", "C")]
-    assert plan.simpler_rule.tolist() == ["A -> C", "B -> C", "A + B -> C"]
+    assert plan.fixed_types.tolist() == [("A", "B", "C"), ("B", "C"),
+                                       ("B", "C", "D"), ("A", "B", "C", "D")]
+    assert plan.simpler_rule.tolist() == ["A -> C", "B -> C", "D -> C", "A + D -> C"]
 
 
 def test_ties_count_and_missing_shuffled_metrics_never_do():
@@ -432,7 +434,7 @@ def test_parent_type_names_are_exact_even_when_they_contain_a_star():
     assert plan.movable_cells.tolist() == [5, 8]  # Ax stays movable.
 
 
-@pytest.mark.parametrize("one_sided,four_item_candidates", [(True, 128), (False, 224)])
+@pytest.mark.parametrize("one_sided,four_item_candidates", [(True, 32), (False, 56)])
 def test_conditional_individual_fdr_groups_sizes_and_pads_all_candidates(one_sided, four_item_candidates):
     result, _ = sample()
     settings = result.settings.replace(one_sided_complex_rules=one_sided)
@@ -445,8 +447,8 @@ def test_conditional_individual_fdr_groups_sizes_and_pads_all_candidates(one_sid
         rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR", "D_NEIGHBOR"]),
     ], index=[5] * 6)
     rules["conditional_p_value"] = [0.0001, 0.0004, 0.03, 0.0002, np.nan, np.nan]
-    # BH ranks the three available 3-item values together, with 144 total candidates.
-    expected = [0.0144, 0.0288, 1, four_item_candidates * 0.0002, np.nan, np.nan]
+    # BH ranks the three available 3-item values together, with 72 total candidates.
+    expected = [0.0072, 0.0144, 0.72, four_item_candidates * 0.0002, np.nan, np.nan]
     p_values = rules["conditional_p_value"]
     families = fdr_families(rules[p_values.notna()], result.labels, settings, n_shuffles=1,
                             max_fdr=None, column="conditional_individual_fdr")
@@ -459,9 +461,9 @@ def test_conditional_individual_fdr_counts_only_enabled_kinds():
     result.settings = result.settings.replace(include_avoidance_rules=False)
     rules.at[1, "lift"] = np.inf  # No shuffle can reach it, so p = 1/100.
     tested, _ = result.add_conditional_p_values(rules, n_shuffles=99, random_seed=4)
-    # Attraction only halves the 3-item family from 144 to 72 candidates.
+    # Attraction only halves the 3-item family from 72 to 36 candidates.
     assert tested.conditional_p_value.iloc[1] == 0.01
-    np.testing.assert_allclose(tested.conditional_individual_fdr, [np.nan, 0.72], equal_nan=True)
+    np.testing.assert_allclose(tested.conditional_individual_fdr, [np.nan, 0.36], equal_nan=True)
 
 
 def test_too_few_shuffles_warns_before_shuffling_and_leaves_conditional_individual_fdr_missing(monkeypatch, caplog):
@@ -475,9 +477,9 @@ def test_too_few_shuffles_warns_before_shuffling_and_leaves_conditional_individu
     monkeypatch.setattr(conditional, "_transactions", capture)
     tested, _ = result.add_conditional_p_values(rules, n_shuffles=9, sample_id="FOV1",
                                                 max_conditional_individual_fdr=0.05)
-    # 144 candidates and one tested rule need 2879 shuffles to reach BH <= 0.05.
+    # 72 candidates and one tested rule need 1439 shuffles to reach BH <= 0.05.
     assert "[FOV1] Insufficient permutation resolution for 3-item" in caplog.text
-    assert "At least 2879 shuffles" in caplog.text
+    assert "At least 1439 shuffles" in caplog.text
     assert np.isfinite(tested.conditional_p_value.iloc[1])
     assert tested.conditional_individual_fdr.isna().all()
 
@@ -493,9 +495,9 @@ def test_conditional_p_values_can_be_requested_without_fdr(caplog):
 
 def test_more_rules_than_candidates_warns_instead_of_raising(caplog):
     result, rules = sample()
-    rules = pd.concat([rules.iloc[[1]]] * 145)
+    rules = pd.concat([rules.iloc[[1]]] * 73)
     tested, _ = result.add_conditional_p_values(rules, n_shuffles=1, random_seed=4)
-    assert "145 3-item rules but only 144 candidates" in caplog.text
+    assert "73 3-item rules but only 72 candidates" in caplog.text
     assert tested.conditional_p_value.notna().all()
     assert tested.conditional_individual_fdr.isna().all()
 

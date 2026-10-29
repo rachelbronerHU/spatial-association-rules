@@ -24,7 +24,7 @@ def rule_name(antecedents, consequents):
 
 
 def _types(items):
-    """Cell types without roles; repeats are kept, so item counts stay intact."""
+    """Cell types without roles, in a stable order."""
     return tuple(sorted(strip_role(item) for item in items))
 
 
@@ -32,5 +32,5 @@ def _shorter(ants, cons):
     """Drop items from the complex side, keeping the other side fixed."""
     parts = ants if len(cons) == 1 else cons
     for size in range(1, len(parts)):
-        for subset in sorted(set(combinations(parts, size))):
+        for subset in combinations(parts, size):
             yield (subset, cons) if len(cons) == 1 else (ants, subset)

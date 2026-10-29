@@ -1041,11 +1041,33 @@ def test_rule_splits_respect_the_complexity_flag(one_sided, expected):
     assert any(len(ant) > 1 and len(con) > 1 for ant, con in splits) == (not one_sided)
 
 
-def test_splits_leave_out_a_type_twice_on_one_side():
-    itemset = frozenset(["A_CENTER", "A_NEIGHBOR", "B_NEIGHBOR"])
-    splits = {(tuple(sorted(ant)), tuple(sorted(con))) for ant, con in splits_of(itemset)}
-    assert splits == {(("A_CENTER",), ("A_NEIGHBOR", "B_NEIGHBOR")),
-                      (("A_CENTER", "B_NEIGHBOR"), ("A_NEIGHBOR",))}
+@pytest.mark.parametrize("one_sided", [False, True])
+@pytest.mark.parametrize("neighbors", [("A_NEIGHBOR", "B_NEIGHBOR"),
+                                      ("A_NEIGHBOR", "B_NEIGHBOR", "C_NEIGHBOR")])
+def test_complex_splits_exclude_repeated_cell_types(one_sided, neighbors):
+    assert not list(splits_of(frozenset(("A_CENTER", *neighbors)), one_sided))
+
+
+@pytest.mark.parametrize("weighting", list(Weighting))
+@pytest.mark.parametrize("one_sided", [False, True])
+def test_both_searches_exclude_repeated_types_only_from_complex_rules(weighting, one_sided):
+    transactions = ([binary("A_CENTER", "A_NEIGHBOR", "B_NEIGHBOR", "D_NEIGHBOR")] * 60
+                    + [binary("D_CENTER", "B_NEIGHBOR", "C_NEIGHBOR")] * 20
+                    + [binary("C_CENTER", "A_NEIGHBOR", "C_NEIGHBOR")] * 20)
+    if weighting is Weighting.WEIGHTED:
+        transactions = [{item: 1.0 if item.endswith("_CENTER") else 0.8 for item in row}
+                        for row in transactions]
+    rules, raw = mine_rules(transactions, base(weighting=weighting, max_items_per_rule=5,
+                                               one_sided_complex_rules=one_sided))
+    for frame in (rules, raw):
+        for row in frame.itertuples():
+            items = row.antecedents + row.consequents
+            if len(items) > 2:
+                assert len(set(map(strip_role, items))) == len(items)
+    complex_rules = rules[rules.len_ant + rules.len_con > 2]
+    assert set(complex_rules.kind) == {"attracts", "avoids"}
+    assert rule_named(rules, ("A_CENTER",), ("A_NEIGHBOR",)).kind == "attracts"
+    assert rule_named(rules, ("D_CENTER",), ("D_NEIGHBOR",)).kind == "avoids"
 
 
 def test_a_center_never_grows_a_neighbor_of_its_own_type():

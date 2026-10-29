@@ -36,13 +36,6 @@ def test_every_shorter_size_counts_and_the_other_side_stays_fixed():
     ]
 
 
-def test_subsets_preserve_rule_direction_and_repeated_types():
-    rules = frame(rule(["A_CENTER", "A_NEIGHBOR", "B_NEIGHBOR"], ["C_NEIGHBOR"]))
-    assert simpler_rules(rules) == [[
-        (("A",), ("C",)), (("B",), ("C",)), (("A", "A"), ("C",)), (("A", "B"), ("C",)),
-    ]]
-
-
 def test_role_arrangements_do_not_change_the_subsets():
     rules = frame(rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"]),
                   rule(["B_CENTER", "A_NEIGHBOR"], ["C_NEIGHBOR"]))

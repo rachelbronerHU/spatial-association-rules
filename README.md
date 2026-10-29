@@ -317,6 +317,10 @@ to `None`, which writes no permutation files.
 rule records which one found it in its `kind` column. `lift >= 1` and `lift < 1` are
 structural, one per search, so no rule can be both.
 
+Complex rules must use each cell type only once across both sides. For example,
+`CD8T + macrophage -> macrophage` is excluded from both searches and the FDR
+candidate count. Pairwise rules such as `CD8T -> CD8T` remain allowed.
+
 **Attraction** — `attraction.py`. FP-growth over the transactions. A rule must:
 
 - clear `min_support` (or `min_support_when_strong` when confidence is high) and

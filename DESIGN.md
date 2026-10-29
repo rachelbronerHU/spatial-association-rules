@@ -55,8 +55,8 @@ That leaves:
   items, since the other side needs one
 - a center seeds a side and only neighbors extend it, so **no side ever holds two
   centers** — a patch has one center, so those could only ever measure zero
-- no side holds a type twice (`X_CENTER + X_NEIGHBOR`); attraction leaves these splits
-  out too. A type may still appear on both sides (`X_CENTER -> X_NEIGHBOR`)
+- complex rules never repeat a cell type, within or across sides; both searches
+  exclude them before measuring rules. Pairwise `X_CENTER -> X_NEIGHBOR` is allowed
 - pairing walks the consequents most-common-first and stops as soon as one is too rare
   for the antecedent in hand
 
@@ -147,6 +147,12 @@ for one center and `r` chosen neighbor types, there are `2**r - 1` unrestricted
 splits. With one-sided complexity there are `r + 1` splits for `r >= 2`, and one
 for `r = 1` (the two possible descriptions of that split coincide).
 
+Complex rules also require distinct cell types across the whole rule. With `L`
+eligible cell types, their neighbor types are chosen from the `L - 1` types other
+than the center's. For `r >= 2`, each kind has
+`L * C(L - 1, r) * splits` candidates. Pairwise rules allow the center's type as a
+neighbor, giving `L * L` candidates per kind. Both FDR calculations use this count.
+
 Complex rules are not classified, and `add_p_values` does not shuffle them. Their
 only test is the optional conditional shuffle below. Mixed rules are never tested.
 
@@ -179,8 +185,8 @@ proper subset of its complex side. They are generated directly, regardless of
 support, mining thresholds, FDR, or presence in `raw_rules`. Only complex rules
 that passed the mining filters enter the normal conditional-testing pipeline.
 
-Subsets use cell types without `_CENTER` and `_NEIGHBOR`, keeping the sides and
-repeated types. A subset need not retain the original center:
+Subsets use cell types without `_CENTER` and `_NEIGHBOR`, keeping the rule's sides.
+A subset need not retain the original center:
 `A_CENTER + B_NEIGHBOR -> C_NEIGHBOR` gives both `A -> C` and `B -> C`.
 Simpler rules that fix the same cell types are one comparison.
 
@@ -210,9 +216,9 @@ the crowding filter. A missing side, or a universal consequent for conviction, m
 the value undefined; such a shuffle never counts but stays in the denominator.
 
 A comparison is untestable when all the rule's types are fixed, a type is missing,
-fewer than two movable labels remain, or the mined metric is missing. A type on both
-sides can cause the first: fixing Fibroblast and Paneth fixes all of
-`Fibroblast_NEIGHBOR + Paneth_CENTER -> Paneth_NEIGHBOR`.
+fewer than two movable labels remain, or the mined metric is missing. For example,
+with B configured as fixed, comparing `A + B -> C` with `A -> C` fixes all three
+types and is untestable.
 
 ### Combining and correcting
 

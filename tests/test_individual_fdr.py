@@ -9,7 +9,7 @@ import pandas as pd
 import pytest
 
 from spatial_association_rules import Method, Settings, Weighting
-from spatial_association_rules.mine import Result
+from spatial_association_rules.mine import Result, mine_rules
 from spatial_association_rules.rules import count_candidate_rules
 from spatial_association_rules.validation.false_discovery import (
     false_discovery_rates, minimum_shuffles_for_fdr,
@@ -54,8 +54,8 @@ def test_invalid_family_size_is_rejected(n_tests):
 
 
 @pytest.mark.parametrize("n_labels,max_items,restricted,unrestricted", [
-    (0, 4, 0, 0), (1, 4, 1, 1), (2, 2, 4, 4), (2, 3, 10, 10),
-    (3, 4, 48, 57), (4, 5, 172, 260),
+    (0, 4, 0, 0), (1, 4, 1, 1), (2, 2, 4, 4), (2, 3, 4, 4),
+    (3, 4, 18, 18), (4, 5, 68, 80),
 ])
 @pytest.mark.parametrize("avoidance", [False, True])
 @pytest.mark.parametrize("one_sided", [False, True])
@@ -70,19 +70,37 @@ def test_candidate_family_counts_centers_neighbor_splits_and_kinds(
     assert count_candidate_rules(labels, settings) == per_kind * (2 if avoidance else 1)
 
 
+@pytest.mark.parametrize("n_labels", [1, 2, 3, 4])
+@pytest.mark.parametrize("avoidance", [False, True])
+@pytest.mark.parametrize("one_sided", [False, True])
+def test_candidate_count_matches_every_rule_the_searches_can_measure(n_labels, avoidance, one_sided):
+    labels = [str(i) for i in range(n_labels)]
+    transactions = [{f"{center}_CENTER": 1.0, **{f"{label}_NEIGHBOR": 1.0 for label in labels}}
+                    for center in labels]
+    settings = Settings(weighting=Weighting.BINARY, method=Method.CN, radius=1,
+                        min_support=0.1, min_lift=1.2, max_items_per_rule=5,
+                        include_avoidance_rules=avoidance, avoidance_max_lift=0.8,
+                        avoidance_min_expected_meetings=1, one_sided_complex_rules=one_sided)
+    _, raw = mine_rules(transactions, settings)
+    assert len(raw) == count_candidate_rules(labels, settings)
+    for size in range(2, 6):
+        measured = (raw.len_ant + raw.len_con == size).sum()
+        assert measured == count_candidate_rules(labels, settings, n_items=size)
+
+
 def test_candidate_family_uses_label_eligibility_but_not_effect_thresholds():
     labels = ["A"] * 5 + ["B"] * 5 + ["rare"]
     settings = Settings(weighting=Weighting.BINARY, method=Method.CN, radius=1,
                         min_support=0.1, min_lift=1.2, max_items_per_rule=3,
                         min_label_count=5, avoidance_max_lift=0.8)
-    assert count_candidate_rules(labels, settings) == 20
-    assert count_candidate_rules(labels, settings.replace(min_lift=100, min_support=0.9)) == 20
-    assert count_candidate_rules(labels, settings.replace(min_label_count=None, min_label_share=0.4)) == 20
+    assert count_candidate_rules(labels, settings) == 8
+    assert count_candidate_rules(labels, settings.replace(min_lift=100, min_support=0.9)) == 8
+    assert count_candidate_rules(labels, settings.replace(min_label_count=None, min_label_share=0.4)) == 8
 
 
 @pytest.mark.parametrize("one_sided,expected", [
-    (True, [2048, 95232, 1269760, 11507200]),
-    (False, [2048, 95232, 2222080, 34521600]),
+    (True, [2048, 89280, 1150720, 10068800]),
+    (False, [2048, 89280, 2013760, 30206400]),
 ])
 def test_candidate_counts_by_size_partition_the_full_family(one_sided, expected):
     settings = Settings(weighting=Weighting.BINARY, method=Method.CN, radius=1,
