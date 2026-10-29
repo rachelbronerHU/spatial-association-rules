@@ -1,7 +1,7 @@
 """
 Deciding whether a rule is real.
 
-significance.py     does a rule survive when the labels are shuffled?
+significance.py     is shuffled lift at least as strong as observed?
 false_discovery.py  many rules were tested at once: correct for that
 """
 

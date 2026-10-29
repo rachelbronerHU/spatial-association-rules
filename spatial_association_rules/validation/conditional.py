@@ -11,7 +11,7 @@ from ..transactions import strip_role
 from .false_discovery import check_fdr_cutoff, fdr_by_size, fdr_families
 from .permutations import record_permutations
 from .significance import (
-    _adjacency, _encode_labels, _held_fixed, _rule_columns, _transactions,
+    _adjacency, _as_strong, _encode_labels, _held_fixed, _rule_columns, _transactions,
     fill_lift_and_conviction, measure_rules, seed_for,
 )
 
@@ -166,12 +166,6 @@ def check_metric(metric):
     """Shared by the runner, so bad input fails before any sample is mined."""
     if metric not in (None, "lift", "conviction"):
         raise ValueError("metric must be 'lift', 'conviction', or None")
-
-
-def _as_strong(shuffled, observed, avoids):
-    """As high as observed for attraction, as low for avoidance. Ties count; NaN never does."""
-    tied = np.isclose(shuffled, observed, rtol=1e-12, atol=0)
-    return np.where(avoids, shuffled <= observed, shuffled >= observed) | tied
 
 
 def _attach_results(rules, plan):

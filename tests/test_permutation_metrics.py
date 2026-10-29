@@ -37,8 +37,10 @@ def measured(result, rules, labels):
 
 
 @pytest.mark.parametrize("weighting", list(Weighting))
-def test_p_value_recording_matches_arithmetic_and_reconstructs_p_values(tmp_path, weighting):
+@pytest.mark.parametrize("kind", ["attracts", "avoids"])
+def test_p_value_recording_matches_arithmetic_and_reconstructs_p_values(tmp_path, weighting, kind):
     result, rules = sample(weighting)
+    rules["kind"] = kind
     rules["rule_idx"] = [23, 7]
     result.rules = rules
     options = dict(n_shuffles=9, random_seed=7, labels_kept_fixed=("C",), calculate_fdr=False)
@@ -62,8 +64,9 @@ def test_p_value_recording_matches_arithmetic_and_reconstructs_p_values(tmp_path
         assert data["test"].item() == "regular_p_value"
         np.testing.assert_allclose(data["lift"], direct[:, :, 0], equal_nan=True)
         np.testing.assert_allclose(data["conviction"], direct[:, :, 1], equal_nan=True)
-        assert data["passed_mining_filters"].dtype == bool
-        reconstructed = (data["passed_mining_filters"].sum(axis=0) + 1) / 10
+        assert "passed_mining_filters" not in data
+        hits = sum(extreme(value, rules.lift.iloc[0], kind) for value in direct[:, 0, 0])
+        reconstructed = [(hits + 1) / 10]
         np.testing.assert_array_equal(recorded.regular_p_value.iloc[:1], reconstructed)
         assert np.isnan(recorded.regular_p_value.iloc[1])
         assert "gain" not in data and "simpler_idx" not in data
@@ -107,7 +110,7 @@ def test_conditional_batches_keep_metrics_and_rule_ids_without_changing_results(
             assert not group.empty
             ids = data["rule_idx"].tolist()
             assert set(ids) == set(group.rule_idx)
-            assert "passed_mining_filters" not in data  # The conditional test ignores thresholds.
+            assert "passed_mining_filters" not in data
             assert "gain" not in data and "simpler_idx" not in data
             rows = rules.set_index("rule_idx").loc[ids]
             rng = np.random.default_rng(seed_for(7, json.dumps(fixed)))
@@ -145,8 +148,9 @@ def test_runner_recording_is_optional_and_keeps_samples_separate(tmp_path, worke
             assert data["sample_id"].item() == result.sample_id
             pairwise = result.rules[result.rules.regular_p_value.notna()]
             np.testing.assert_array_equal(data["rule_idx"], pairwise.rule_idx)
-            np.testing.assert_array_equal((data["passed_mining_filters"].sum(axis=0) + 1) / 10,
-                                          pairwise.regular_p_value)
+            for column, row in enumerate(pairwise.itertuples()):
+                hits = sum(extreme(value, row.lift, row.kind) for value in data["lift"][:, column])
+                assert (hits + 1) / 10 == row.regular_p_value
 
 
 def test_empty_rules_and_no_shuffles_do_not_create_archives(tmp_path):
@@ -238,16 +242,17 @@ def test_recording_uses_disk_buffers_and_closes_them(tmp_path, test, failure):
 
 def test_p_value_recording_reuses_owned_row_buffers(tmp_path, monkeypatch):
     result, rules = sample()
+    result.rules = rules
     module = import_module("spatial_association_rules.validation.significance")
-    original = module.survives_shuffle
+    original = module.fill_lift_and_conviction
     rows = []
 
-    def measure(*args, metrics_out=None):
-        assert all(row.flags.owndata and row.base is None for row in metrics_out)
-        rows.append(metrics_out)
-        return original(*args, metrics_out=metrics_out)
+    def measure(measured, out):
+        assert all(row.flags.owndata and row.base is None for row in out)
+        rows.append(out)
+        return original(measured, out)
 
-    monkeypatch.setattr(module, "survives_shuffle", measure)
+    monkeypatch.setattr(module, "fill_lift_and_conviction", measure)
     result.add_p_values(9, random_seed=7, permutation_dir=tmp_path, sample_id="FOV")
     assert len(rows) == 9 and all(row is rows[0] for row in rows)
     # The row buffers remain safe to read after the mapped files are closed.

@@ -2,7 +2,7 @@
 Is a rule more than an accident of how common its cell types are?
 
 Hold the tissue still, shuffle the labels between cells, and see how often the rule
-still passes. See README, "add_p_values".
+has lift at least as strong as observed. See README, "add_p_values".
 """
 
 import logging
@@ -13,8 +13,6 @@ from typing import NamedTuple
 import numpy as np
 from scipy import sparse
 
-from ..attraction import attracts
-from ..avoidance import avoids
 from ..rules import AVOIDS, metrics, packed, support_of_many, support_of_many_packed
 from ..settings import Weighting
 from ..transactions import CENTER, NEIGHBOR, item_of
@@ -42,14 +40,7 @@ def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labe
         return np.ones(len(rules))
     
     if "kind" not in rules.columns:
-        raise ValueError("rules need a 'kind' column: a rule is tested against the "
-                         "thresholds of the search that found it, and this cannot guess which")
-    
-    if (rules["kind"] == AVOIDS).any() and settings.avoidance_max_lift is None:
-        raise ValueError("these rules include avoidance, but the settings have no "
-                         "avoidance_max_lift to test them against. Testing them by a "
-                         "different threshold than the one that found them would make "
-                         "the p-values answer a different question")
+        raise ValueError("rules need a 'kind' column to choose the lift comparison direction")
 
 
     # --- 1. ENCODE LABELS ---
@@ -86,13 +77,14 @@ def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labe
     
     rng = np.random.default_rng(random_seed)
     layout = _rule_columns(rules, item_index)
+    observed = rules["lift"].to_numpy(dtype=float)
 
     prefix = f"[{sample_id}] " if sample_id else ""
     logger.info(f"{prefix}Shuffling labels {n_shuffles} times against {len(rules)} rules...")
     started = time.time()
 
     # --- 4. THE SHUFFLE TEST ---
-    # Randomize label assignments n times to see if rules survive by chance.
+    # Randomize label assignments n times to compare shuffled and observed lifts.
     #
     # How matrix multiplication (centers @ shuffled) instantly rebuilds the patches.
     # Imagine the shuffle just randomly turned Cell 1 into a Macrophage:
@@ -105,7 +97,7 @@ def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labe
     # P2: [  1,  0,  0  ]          C2: [ 1, 0, 0 ]           P2: [ 0, 1, 0 ]
     # 
     # The math instantly maps the fake labels onto the physical patches!
-    survived = np.zeros(len(rules))
+    hits = np.zeros(len(rules), dtype=int)
     rule_idx = None
     fixed_types = ()
     if permutation_dir is not None:
@@ -114,7 +106,7 @@ def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labe
     with record_permutations(permutation_dir, n_shuffles, rule_idx,
                              sample_id=sample_id, test="regular_p_value", fixed_types=fixed_types) as recorded:
         # Reuse ordinary row buffers; no mapped views leave the batch.
-        metrics_out = (np.empty(len(rules)), np.empty(len(rules))) if recorded is not None else None
+        metrics_out = (np.empty(len(rules)), np.empty(len(rules)))
         for i in range(n_shuffles):
             order = np.arange(len(labels))
             if movable.size > 1:
@@ -125,12 +117,11 @@ def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labe
             transactions = _transactions(shuffled, (centers, neighbors, membership, patch_sizes), settings)
 
             # Reuse the same measurements for testing and optional recording.
-            passed = survives_shuffle(layout, transactions, settings, metrics_out=metrics_out)
-            survived += passed
+            fill_lift_and_conviction(measure_rules(layout, transactions, settings), metrics_out)
+            hits += _as_strong(metrics_out[0], observed, layout.avoiding)
             if recorded is not None:
                 recorded["lift"][i] = metrics_out[0]
                 recorded["conviction"][i] = metrics_out[1]
-                recorded["passed_mining_filters"][i] = passed
 
             if i == 0 or (i + 1) % 100 == 0 or i == n_shuffles - 1:
                 logger.debug(f"{prefix}  shuffle {i + 1}/{n_shuffles}")
@@ -139,8 +130,8 @@ def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labe
     logger.info(f"{prefix}Shuffling took {int(elapsed // 60)}m {elapsed % 60:.1f}s" if elapsed >= 60 else f"{prefix}Shuffling took {elapsed:.2f}s")
 
     # --- 5. SCORE P-VALUES ---
-    # (times survived by luck + 1) / (total shuffles + 1)
-    p_values = (survived + 1) / (n_shuffles + 1)
+    # (shuffled lifts at least as strong as observed + 1) / (total shuffles + 1)
+    p_values = (hits + 1) / (n_shuffles + 1)
     
     # If a cell type was completely absent, its rule was never tested (p = 1.0).
     p_values[~layout.usable] = 1.0
@@ -256,7 +247,7 @@ def _check_enough_moves(movable, n_cells, patterns):
 
 
 class _Layout(NamedTuple):
-    """Where each rule finds its supports, and which judge it answers to."""
+    """Where each rule finds its supports, and its comparison direction."""
 
     sized: list          # (positions, columns) per group size, measured in one array
     n_groups: int
@@ -344,26 +335,10 @@ def fill_lift_and_conviction(measured, out):
     out[1][defined] = conviction[defined]
 
 
-def survives_shuffle(layout, transactions, settings, *, metrics_out=None):
-    """Which rules still pass their own thresholds here. Each judged by its own kind."""
-    measured = measure_rules(layout, transactions, settings)
-    if metrics_out is not None:
-        fill_lift_and_conviction(measured, metrics_out)
-    held = np.zeros(len(layout.usable))
-    if measured is None or not measured[-1].any():
-        return held
-
-    # Each rule takes its own judge's answer. Attraction-only settings may leave the
-    # avoidance thresholds unset, so avoidance is judged only when it was searched.
-    ant_sup, con_sup, joint, measures, present = measured
-    n = transactions.shape[0]
-    judged = attracts(settings, joint, ant_sup, con_sup, measures, n)
-    if settings.include_avoidance_rules:
-        judged = np.where(layout.avoiding,
-                          avoids(settings, joint, ant_sup, con_sup, measures, n), judged)
-    held[present] = judged[present]
-    return held
-
+def _as_strong(shuffled, observed, avoids):
+    """As high as observed for attraction, as low for avoidance. Ties count; NaN never does."""
+    tied = np.isclose(shuffled, observed, rtol=1e-12, atol=0)
+    return np.where(avoids, shuffled <= observed, shuffled >= observed) | tied
 
 
 def _dense(matrix):

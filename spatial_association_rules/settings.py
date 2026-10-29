@@ -83,8 +83,7 @@ class Settings:
              f"({self.min_support}): it lowers the bar for confident rules, it cannot raise it"),
             (self.min_lift >= 1, f"min_lift must be >= 1, got {self.min_lift}"),
             (not self.include_avoidance_rules or self.avoidance_max_lift is not None,
-             "include_avoidance_rules needs avoidance_max_lift: without it a shuffled tissue "
-             "passes as often as the real one and the p-values mean nothing. Pass "
+             "include_avoidance_rules needs avoidance_max_lift to define avoidance. Pass "
              "include_avoidance_rules=False to search for attraction only"),
             (self.avoidance_max_lift is None or 0 <= self.avoidance_max_lift < 1,
              f"avoidance_max_lift must be in [0, 1), got {self.avoidance_max_lift}"),

@@ -11,7 +11,7 @@ Order matters: section 1 first, then 2, then the rest.
 
 | # | Problem | Where |
 |---|---|---|
-| 1 | Validate the retained **threshold-based** shuffle test on pre-specified rules under the null. Full-family FDR is now implemented (see section 5). The original 65% at p <= 0.05 was measured among mined rules over 12 random datasets, so it is not by itself a calibration check. | `validation/significance.py`, `validation/false_discovery.py` |
+| 1 | Validate the **lift-based** shuffle test on pre-specified rules under the null. Full-family FDR is now implemented (see section 5). The original 65% at p <= 0.05 was measured among mined rules over 12 random datasets, so it is not by itself a calibration check. | `validation/significance.py`, `validation/false_discovery.py` |
 | 2 | **Cells sharing the same position, under KNN.** The centre cell can be missing from its own patch, so the patch gets k+1 neighbours instead of k, and the crowding check never sees the centre's own label. Only affects `KNN_R`. Runs using `CN` are not touched. | `transactions.py:55-61`, `:81` |
 | 4 | **Plain text settings quietly pick the wrong method.** `weighting="weighted"` runs BINARY, and `method="CN"` runs KNN_R. The settings are compared by identity, and plain text is never converted. | `settings.py:64` |
 | 5 | `min_label_share` rounds **down**. With 105 cells, a label with 10 cells (9.5%) passes a 10% bar. Should round up. | `rules.py:181` |
@@ -34,7 +34,7 @@ Order matters: section 1 first, then 2, then the rest.
 ## 4. Tests
 
 - Nothing covers `run_samples` reporting failed samples
-- No null-calibration test on pre-specified rules: small p-values should occur no more often than their cutoff; the pass/fail test need not be uniform
+- No null-calibration test on pre-specified rules: small p-values should occur no more often than their cutoff
 - The weighted search has no test against a known-correct answer. The one golden test uses binary weights.
 - No test for cells sharing the same position
 - No automatic test run across Python 3.10 to 3.14
@@ -47,7 +47,7 @@ Order matters: section 1 first, then 2, then the rest.
 - The test assumes any cell label could sit anywhere in the tissue
 - Whether the shuffling should be held within regions or cell groups instead
 
-Implemented correction (2026-09-10), retaining the threshold-based shuffle test:
+Implemented FDR correction (2026-09-10):
 
 1. Define and count the complete candidate-rule family.
 2. Run permutations only for rules that pass the observed thresholds.

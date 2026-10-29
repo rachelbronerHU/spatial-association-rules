@@ -39,10 +39,8 @@ from spatial_association_rules.rules import (
     weight_matrix,
 )
 from spatial_association_rules.validation.significance import (
-    _rule_columns,
     not_crowded,
     p_values_for,
-    survives_shuffle,
 )
 from spatial_association_rules.validation.false_discovery import false_discovery_rates
 from spatial_association_rules.transactions import (
@@ -458,13 +456,7 @@ def test_settings_reject_impossible_values(bad):
         base(**bad)
 
 
-def test_the_thresholds_that_make_a_p_value_mean_something_are_required():
-    """
-    Without them a shuffled tissue passes as often as the real one.
-
-    min_lift always, and avoidance_max_lift whenever that search is on. Saying so in
-    the type is the only way a caller cannot quietly end up with meaningless p-values.
-    """
+def test_the_lift_thresholds_that_define_the_searches_are_required():
     with pytest.raises(TypeError):                       # min_lift has no default
         Settings(weighting=Weighting.BINARY, method=Method.CN, radius=25.0,
                  min_support=0.01, max_items_per_rule=2)
@@ -537,18 +529,6 @@ def test_a_pair_that_never_co_occurs_is_found():
     assert rule["leverage"] == pytest.approx(-0.25)      # 0 - 0.5 * 0.5
 
 
-def test_a_pair_that_never_co_occurs_survives_no_shuffle():
-    """The null must judge it as avoidance too, or its p-value is about another rule."""
-    transactions = apart()
-    settings = base(min_support=0.1)
-    rules = filtered_rules(transactions, settings)
-
-    matrix, item_index = weight_matrix(transactions)
-    layout = _rule_columns(rules, item_index)
-    # The real tissue, unshuffled: every mined rule must still pass its own thresholds.
-    assert survives_shuffle(layout, matrix, settings).all()
-
-
 def test_a_meeting_nobody_expected_is_not_a_finding():
     """
     Two cell types that were never going to meet anyway say nothing by not meeting.
@@ -602,13 +582,6 @@ def test_avoidance_uses_the_larger_expected_meetings_floor(weighting, n, absolut
     target = (rules["antecedents"] == ("A_CENTER",)) & (rules["consequents"] == ("D_NEIGHBOR",))
     assert target.any() == expected
 
-    # A previously mined rule must face the same floor during permutation testing.
-    reference = filtered_rules(transactions, base(weighting=weighting))
-    reference = reference[(reference["antecedents"] == ("A_CENTER",))
-                          & (reference["consequents"] == ("D_NEIGHBOR",))]
-    matrix, item_index = weight_matrix(transactions)
-    assert survives_shuffle(_rule_columns(reference, item_index), matrix, settings).tolist() == [expected]
-
 
 @pytest.mark.parametrize("weighting", list(Weighting))
 @pytest.mark.parametrize("cap, expected", [(None, True), (0.8, True), (0.79, False), (0.0, False)])
@@ -626,11 +599,6 @@ def test_avoidance_max_confidence_is_inclusive_and_does_not_filter_attraction(we
     assert rule_named(rules, ("D_CENTER",), ("C_NEIGHBOR",))["confidence"] == 0.0
     pd.testing.assert_frame_equal(original[original["kind"] == "attracts"].reset_index(drop=True),
                                   rules[rules["kind"] == "attracts"].reset_index(drop=True))
-
-    reference = original[(original["antecedents"] == ("A_CENTER",))
-                          & (original["consequents"] == ("B_NEIGHBOR",))]
-    matrix, item_index = weight_matrix(transactions)
-    assert survives_shuffle(_rule_columns(reference, item_index), matrix, settings).tolist() == [expected]
 
 
 def test_a_rare_cell_type_can_still_be_the_centre():
@@ -1014,22 +982,30 @@ def test_exactly_one_role_is_stripped_and_only_from_the_end():
     assert strip_role("X_CENTER_NEIGHBOR") == "X_CENTER"
 
 
-def test_avoidance_rules_cannot_be_tested_without_their_threshold():
-    """
-    Judging them by a threshold other than the one that found them answers another question.
-
-    Reachable by turning the avoidance search off on a result that already holds
-    avoidance rules.
-    """
+@pytest.mark.parametrize("weighting", list(Weighting))
+@pytest.mark.parametrize("kind", ["attracts", "avoids"])
+def test_p_values_use_observed_lift_without_mining_thresholds(weighting, kind):
     coords, labels = grid_tissue()
-    result = mine(coords, labels, base(min_patches=0))
-    assert (result.rules["kind"] == "avoids").any()
+    result = mine(coords, labels, base(weighting=weighting))
+    result.rules = result.rules[result.rules.kind == kind].copy()
+    assert not result.rules.empty
+    options = dict(n_shuffles=19, random_seed=7, calculate_fdr=False)
+    expected = result.add_p_values(**options)
 
-    without = result.settings.replace(include_avoidance_rules=False, avoidance_max_lift=None)
-    blind = Result(rules=result.rules, stats=result.stats, patches=result.patches,
-                   labels=result.labels, settings=without)
-    with pytest.raises(ValueError, match="avoidance_max_lift"):
-        blind.add_p_values(n_shuffles=5)
+    result.settings = result.settings.replace(
+        min_support=0.99, min_lift=100, min_patches=10000,
+        min_confidence=1, min_leverage=1, min_conviction=100,
+        include_avoidance_rules=False, avoidance_max_lift=None,
+        avoidance_max_confidence=0, avoidance_max_leverage=-1,
+        avoidance_min_expected_meetings=10000, avoidance_min_expected_support=0.99,
+    )
+    pd.testing.assert_frame_equal(result.add_p_values(**options), expected)
+
+    # Changing the observed lift changes the comparison, even with the same shuffles.
+    result.rules["lift"] = np.inf if kind == "attracts" else -np.inf
+    tested = result.add_p_values(**options)
+    assert (tested.regular_p_value == 1 / 20).all()
+    assert (expected.regular_p_value > 1 / 20).any()
 
 
 @pytest.mark.parametrize("weighting", [Weighting.BINARY, Weighting.WEIGHTED])

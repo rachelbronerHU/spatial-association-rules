@@ -30,10 +30,6 @@ def record_permutations(permutation_dir, n_shuffles, rule_idx, *, sample_id, tes
         raise FileExistsError(f"{path} already exists; clear the permutation folder before re-running")
     shape = (n_shuffles, len(rule_idx))
     dtypes = {"lift": float, "conviction": float}
-    
-    if test == "regular_p_value": 
-        # Only the regular p-value test counts threshold passes, and not for conditional_p_value (complex rules)
-        dtypes["passed_mining_filters"] = bool
     with ExitStack() as buffers:
         arrays = {}
         try:

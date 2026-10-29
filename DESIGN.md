@@ -62,15 +62,10 @@ That leaves:
 
 ## Why the two lift thresholds are required
 
-The shuffle test asks how often a rule still passes **its own thresholds** in a shuffled
-tissue. With no lift threshold there is nothing left to fail:
-
-- avoidance reduces to `lift < 1`, which a shuffle clears about half the time, so every
-  p-value lands near 0.5 and the test carries no information
-- attraction still has the support policy, so it degrades less sharply, but the same way
-
-Every other threshold is genuinely optional. Unset means no extra tightening, not no
-filtering.
+`min_lift` defines the attraction effects to mine; `avoidance_max_lift` defines
+avoidance when that search is enabled. Other effect thresholds are optional.
+The shuffle test compares each selected rule's shuffled lift with its observed lift,
+independently of the mining thresholds.
 
 ## Testing many rules at once
 
@@ -95,8 +90,10 @@ rows. The allowed rules depend on the maximum rule size and minimum cell-count/s
 settings, and `one_sided_complex_rules`. Counting only the kept rules would ignore the wider search that found them.
 See [Hämäläinen and Webb (2019), §6](https://doi.org/10.1007/s10618-018-0590-x).
 
-The raw p-value is `(s + 1) / (B + 1)`: `s` is how many shuffles pass the rule's
-thresholds, and `B` is the number of shuffles. Adding one prevents zero p-values
+The raw p-value is `(s + 1) / (B + 1)`: `s` counts shuffled lifts at least as high
+as observed for attraction, or at least as low for avoidance; `B` is the number of
+shuffles. Ties count (relative tolerance 1e-12); undefined shuffled lifts do not.
+Adding one prevents zero p-values
 ([Phipson and Smyth, 2010](https://gksmyth.github.io/pubs/PermPValuesPreprint.pdf)).
 The smallest possible p-value is therefore `1 / (B + 1)`.
 
@@ -263,8 +260,7 @@ rules; conditional batches hold their complex rules only. See the
 
 Arrays use Python's public `mmap` API with temporary files, allowing the operating
 system to reclaim their pages under memory pressure. Buffer space per worker is
-`shuffles × rules × 17` bytes for the regular p-value test, including threshold-pass flags,
-and `× 16` for the conditional test.
+`shuffles × rules × 16` bytes for either test.
 Python chooses the temporary directory, respecting `TMPDIR`, `TEMP`, and `TMP`, so
 buffers can use local disk while final archives go to the chosen output folder.
 Mapped pages still count toward resident memory, including job memory limits; this

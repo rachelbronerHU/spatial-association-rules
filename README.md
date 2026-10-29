@@ -136,7 +136,7 @@ One row per rule. `mine` gives the first block, `add_p_values` the second, and
 | 3 | `transactions.py` | patch → transaction. Same-label neighbors add up, capped at 1.0. Patches dominated by one label are dropped |
 | 4 | `attraction.py`, `avoidance.py` | two searches, one per claim — see below |
 | 5 | `rules.py` | measure and judge. Rules naming a too-rare cell type are dropped |
-| 6 | `validation/significance.py` | shuffle the labels, see how often a pairwise rule still passes → `regular_p_value` |
+| 6 | `validation/significance.py` | shuffle the labels, compare pairwise lift with observed lift → `regular_p_value` |
 | 7 | `validation/conditional.py` | optional: shuffle with each simpler rule's types fixed, see how often a complex rule is as strong as mined → `conditional_p_value` |
 
 Every step runs per sample. Nothing is pooled across samples: the library gives no
@@ -185,6 +185,10 @@ threshold set to `None` is not applied.
 
 Only pairwise rules are shuffled here. Complex rules keep `NaN` in both columns;
 the [conditional test](#optional-conditional-tests) judges them instead.
+
+A shuffle counts when its lift is at least as high as observed for attraction, or
+at least as low for avoidance. Ties count; undefined shuffled lifts do not. Mining
+thresholds play no part. The p-value is `(count + 1) / (n_shuffles + 1)`.
 
 Testing many rules increases the risk of chance findings. The correction accounts
 for all allowed pairwise rules, including those the search dropped. It groups rules
@@ -284,7 +288,6 @@ Each `.npz` contains:
 |---|---|
 | `rule_idx` | rule IDs identifying metric columns, matching the returned rules |
 | `lift`, `conviction` | float64 arrays with shape `(permutations, rules)` |
-| `passed_mining_filters` | regular p-value archive only: whether each rule passed its mining thresholds |
 | `sample_id`, `test` | string scalars identifying the sample and test |
 | `fixed_types` | cell types held fixed in this batch |
 
@@ -297,8 +300,10 @@ in `comparisons` to rebuild its conditional p-value.
 with np.load("output/permutations/sample_FOV1/regular_p_value.npz") as data:
     column = np.flatnonzero(data["rule_idx"] == rule_idx)[0]
     shuffled_lifts = data["lift"][:, column]
-    # The regular p-value test counts passes of mining thresholds, rather than lift exceedances.
-    regular_p_value = (data["passed_mining_filters"][:, column].sum() + 1) / (len(shuffled_lifts) + 1)
+    row = rules.loc[rules.rule_idx == rule_idx].iloc[0]
+    hits = shuffled_lifts <= row.lift if row.kind == "avoids" else shuffled_lifts >= row.lift
+    hits |= np.isclose(shuffled_lifts, row.lift, rtol=1e-12, atol=0)
+    regular_p_value = (hits.sum() + 1) / (len(shuffled_lifts) + 1)
 ```
 
 For single-sample calls, pass `permutation_dir` (for example, `"output/permutations"`)
