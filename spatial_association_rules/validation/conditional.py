@@ -21,7 +21,7 @@ PLAN_COLUMNS = ["rule_pos", "rule", "simpler_rule", "kind", "metric", "observed"
                 "fixed_types", "movable_cells", "status"]
 
 
-def conditional_test_plan(rules, raw_rules, labels, labels_kept_fixed=(), metric=None):
+def conditional_test_plan(rules, labels, labels_kept_fixed=(), metric=None):
     """List the comparisons and their fixed cell types, without shuffling.
 
     metric: "lift", "conviction", or None for lift on complex antecedents and
@@ -41,7 +41,7 @@ def conditional_test_plan(rules, raw_rules, labels, labels_kept_fixed=(), metric
     movable_by_fixed = {}
     comparisons = []
     rows = rules.itertuples(index=False)
-    for pos, (row, simpler) in enumerate(zip(rows, simpler_rules(rules, raw_rules))):
+    for pos, (row, simpler) in enumerate(zip(rows, simpler_rules(rules))):
         rule_types = set(map(strip_role, tuple(row.antecedents) + tuple(row.consequents)))
         row_metric = metric or ("lift" if len(row.consequents) == 1 else "conviction")
         observed = getattr(row, row_metric)
@@ -74,7 +74,7 @@ def conditional_test_plan(rules, raw_rules, labels, labels_kept_fixed=(), metric
     return plan
 
 
-def conditional_p_values(rules, raw_rules, patches, labels, settings, *, n_shuffles,
+def conditional_p_values(rules, patches, labels, settings, *, n_shuffles,
                          random_seed=None, labels_kept_fixed=(), metric=None, sample_id="",
                          calculate_fdr=True, max_conditional_individual_fdr=None,
                          permutation_dir=None):
@@ -89,7 +89,7 @@ def conditional_p_values(rules, raw_rules, patches, labels, settings, *, n_shuff
         raise ValueError("max_conditional_individual_fdr requires calculate_fdr=True")
     check_shuffle_count(n_shuffles, "n_shuffles")
     labels = np.asarray(labels, dtype=str)
-    plan = conditional_test_plan(rules, raw_rules, labels, labels_kept_fixed, metric)
+    plan = conditional_test_plan(rules, labels, labels_kept_fixed, metric)
     plan["p_value"] = np.nan
     ids = rules["rule_idx"].to_numpy() if "rule_idx" in rules else np.arange(len(rules))
     batches = 0
@@ -178,8 +178,6 @@ def _attach_results(rules, plan):
         p_value = np.nan
         if not is_one_sided_complex(row.antecedents, row.consequents):
             status = "not_applicable"
-        elif comparisons is None:
-            status = "no_simpler"
         elif comparisons["p_value"].isna().any():
             status = "untestable"
         else:

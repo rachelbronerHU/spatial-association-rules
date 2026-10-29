@@ -1,4 +1,4 @@
-"""Which shorter rules a complex rule is matched with."""
+"""Every shorter cell-type combination used to test a complex rule."""
 
 import pandas as pd
 import pytest
@@ -17,43 +17,33 @@ def frame(*rows):
 def test_pairwise_and_mixed_rules_have_no_simpler_rules():
     rules = frame(rule(["A_CENTER"], ["C_NEIGHBOR"]),
                   rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR", "D_NEIGHBOR"]))
-    raw = frame(rule(["A_CENTER"], ["C_NEIGHBOR"]), rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"]))
-    assert simpler_rules(rules, raw) == [[], []]
+    assert simpler_rules(rules) == [[], []]
 
 
 @pytest.mark.parametrize("kind", ["attracts", "avoids"])
-def test_any_measured_raw_rule_counts_whatever_its_kind(kind):
-    rules = frame(rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"]))
-    raw = frame(rule(["A_CENTER"], ["C_NEIGHBOR"], kind=kind))
-    assert simpler_rules(rules, raw) == [[(("A",), ("C",))]]
-
-
-def test_only_raw_rules_count_not_the_mined_table():
-    rules = frame(rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"]), rule(["A_CENTER"], ["C_NEIGHBOR"]))
-    assert simpler_rules(rules, frame(rule(["B_CENTER"], ["C_NEIGHBOR"]))) == [[(("B",), ("C",))], []]
-    assert simpler_rules(rules, pd.DataFrame()) == [[], []]
+def test_every_shorter_combination_counts_for_either_kind(kind):
+    rules = frame(rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"], kind=kind))
+    assert simpler_rules(rules) == [[(("A",), ("C",)), (("B",), ("C",))]]
 
 
 def test_every_shorter_size_counts_and_the_other_side_stays_fixed():
     rules = frame(rule(["A_CENTER", "B_NEIGHBOR", "D_NEIGHBOR"], ["C_NEIGHBOR"]),
                   rule(["A_CENTER"], ["B_NEIGHBOR", "C_NEIGHBOR"]))
-    raw = frame(rule(["A_CENTER"], ["C_NEIGHBOR"]), rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"]),
-                rule(["A_CENTER"], ["B_NEIGHBOR"]), rule(["C_CENTER"], ["A_NEIGHBOR"]))
-    assert simpler_rules(rules, raw) == [
-        [(("A",), ("C",)), (("A", "B"), ("C",))],
+    assert simpler_rules(rules) == [
+        [(("A",), ("C",)), (("B",), ("C",)), (("D",), ("C",)),
+         (("A", "B"), ("C",)), (("A", "D"), ("C",)), (("B", "D"), ("C",))],
         [(("A",), ("B",)), (("A",), ("C",))],
     ]
 
 
-def test_matching_preserves_rule_direction_and_repeated_types():
-    rules = frame(rule(["A_CENTER", "A_NEIGHBOR"], ["C_NEIGHBOR"]))
-    assert simpler_rules(rules, frame(rule(["C_CENTER"], ["A_NEIGHBOR"]))) == [[]]
-    assert simpler_rules(rules, frame(rule(["A_CENTER"], ["C_NEIGHBOR"]))) == [[(("A",), ("C",))]]
-
-
-def test_role_arrangements_of_the_same_types_are_one_simpler_rule():
+def test_subsets_preserve_rule_direction_and_repeated_types():
     rules = frame(rule(["A_CENTER", "A_NEIGHBOR", "B_NEIGHBOR"], ["C_NEIGHBOR"]))
-    raw = frame(rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"]),
-                rule(["B_CENTER", "A_NEIGHBOR"], ["C_NEIGHBOR"]),
-                rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"], kind="avoids"))
-    assert simpler_rules(rules, raw) == [[(("A", "B"), ("C",))]]
+    assert simpler_rules(rules) == [[
+        (("A",), ("C",)), (("B",), ("C",)), (("A", "A"), ("C",)), (("A", "B"), ("C",)),
+    ]]
+
+
+def test_role_arrangements_do_not_change_the_subsets():
+    rules = frame(rule(["A_CENTER", "B_NEIGHBOR"], ["C_NEIGHBOR"]),
+                  rule(["B_CENTER", "A_NEIGHBOR"], ["C_NEIGHBOR"]))
+    assert simpler_rules(rules) == [[(("A",), ("C",)), (("B",), ("C",))]] * 2

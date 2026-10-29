@@ -97,7 +97,7 @@ class Result:
 
     def conditional_test_plan(self, tested, *, labels_kept_fixed=(), metric=None):
         """Preview comparisons and fixed cell types. No shuffles are run."""
-        return conditional_test_plan(tested, self.raw_rules, self.labels, labels_kept_fixed, metric)
+        return conditional_test_plan(tested, self.labels, labels_kept_fixed, metric)
 
     def add_conditional_p_values(self, tested, *, n_shuffles, random_seed=None,
                                  labels_kept_fixed=(), metric=None, sample_id="",
@@ -105,13 +105,14 @@ class Result:
                                  permutation_dir=None):
         """Return (rules, comparisons) with conditional p-values for complex rules.
 
-        Simpler rules come from raw_rules. Fixed labels recorded by add_p_values are
-        kept; labels_kept_fixed adds more. metric: "lift", "conviction", or None for
-        lift on complex antecedents and conviction on complex consequents. With
+        Every nonempty proper subset of the complex side is compared. Fixed labels
+        recorded by add_p_values are kept; labels_kept_fixed adds more.
+        metric: "lift", "conviction", or None for lift on complex antecedents and
+        conviction on complex consequents. With
         max_conditional_individual_fdr set, warn when too few shuffles can reach it. See DESIGN.md.
         """
         return conditional_p_values(
-            tested, self.raw_rules, self.patches, self.labels, self.settings,
+            tested, self.patches, self.labels, self.settings,
             n_shuffles=n_shuffles, random_seed=random_seed,
             labels_kept_fixed=labels_kept_fixed, metric=metric, sample_id=sample_id,
             calculate_fdr=calculate_fdr,

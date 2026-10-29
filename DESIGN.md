@@ -72,7 +72,7 @@ independently of the mining thresholds.
 `raw_rules` holds rules after their metrics are measured, before the final
 thresholds and rare-label filter. It excludes candidates pruned earlier by the
 attraction support floor or avoidance search. Only pairwise `rules` are shuffled by
-`add_p_values`; `raw_rules` supply the simpler rules for the conditional test.
+`add_p_values`; conditional tests generate simpler rules directly from complex rules.
 
 Searching many rules makes chance findings more likely. `add_p_values()` returns
 the raw `regular_p_value` and, by default, a corrected value, `individual_fdr`. Set
@@ -174,19 +174,15 @@ References:
 
 ### Simpler rules
 
-A complex rule's simpler rules are the rules in `raw_rules` that keep its single-item
-side and drop one or more items from its complex side. `raw_rules` holds every rule
-the searches measured, of either kind, before the final thresholds, so no threshold
-or FDR decides which simpler rules count.
+A complex rule's simpler rules keep its single-item side and take every nonempty
+proper subset of its complex side. They are generated directly, regardless of
+support, mining thresholds, FDR, or presence in `raw_rules`. Only complex rules
+that passed the mining filters enter the normal conditional-testing pipeline.
 
-Matching ignores `_CENTER` and `_NEIGHBOR` but keeps the sides and repeated types.
-So `Fibroblast_NEIGHBOR + Paneth_CENTER -> Paneth_NEIGHBOR` matches
-`Paneth -> Paneth`. Simpler rules that fix the same cell types are one comparison.
-
-Every valid simpler rule of a mined complex rule is in `raw_rules`. For attraction,
-its itemset is part of a frequent itemset. For avoidance, a shorter side is at least
-as common as the longer one, so it clears the same bars. A shorter rule without the
-center is not a valid rule in either search and is never matched.
+Subsets use cell types without `_CENTER` and `_NEIGHBOR`, keeping the sides and
+repeated types. A subset need not retain the original center:
+`A_CENTER + B_NEIGHBOR -> C_NEIGHBOR` gives both `A -> C` and `B -> C`.
+Simpler rules that fix the same cell types are one comparison.
 
 ### Fixed cells and the null
 
@@ -221,7 +217,7 @@ sides can cause the first: fixing Fibroblast and Paneth fixes all of
 ### Combining and correcting
 
 `conditional_p_value` is the largest comparison p-value, so the rule must beat every
-simpler rule. One untestable comparison, or no simpler rule, leaves it missing;
+simpler rule. One untestable comparison leaves it missing;
 `comparisons` keeps each result and its status.
 
 `conditional_individual_fdr` is Benjamini–Hochberg per sample and rule size, one p-value per rule,

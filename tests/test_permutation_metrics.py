@@ -78,7 +78,7 @@ def test_p_value_recording_matches_arithmetic_and_reconstructs_p_values(tmp_path
 @pytest.mark.parametrize("kind", ["attracts", "avoids"])
 def test_conditional_batches_keep_metrics_and_rule_ids_without_changing_results(
         tmp_path, monkeypatch, weighting, consequent, kind):
-    result, rules = sample(weighting, consequent=consequent, two_parents=not consequent)
+    result, rules = sample(weighting, consequent=consequent)
     rules["kind"] = kind
     rules["rule_idx"] = np.arange(len(rules)) * 11 + 7
     conditional = import_module("spatial_association_rules.validation.conditional")

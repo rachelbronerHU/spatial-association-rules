@@ -1,4 +1,4 @@
-"""Match complex rules with their shorter parts. See DESIGN.md, "Simpler rules"."""
+"""Generate every shorter part of a complex rule. See DESIGN.md, "Simpler rules"."""
 
 from itertools import combinations
 
@@ -10,14 +10,12 @@ def is_one_sided_complex(antecedents, consequents):
     return (len(antecedents) > 1) != (len(consequents) > 1)
 
 
-def simpler_rules(rules, raw_rules):
-    """For each rule, the shorter cell-type rules measured in raw_rules, of either kind."""
-    measured = {(_types(a), _types(c))
-                for a, c in zip(raw_rules.get("antecedents", ()), raw_rules.get("consequents", ()))}
+def simpler_rules(rules):
+    """For each complex rule, every nonempty proper subset of its complex side."""
     found = []
     for a, c in zip(rules["antecedents"], rules["consequents"]):
         shorter = _shorter(_types(a), _types(c)) if is_one_sided_complex(a, c) else ()
-        found.append([rule for rule in shorter if rule in measured])
+        found.append(list(shorter))
     return found
 
 

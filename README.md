@@ -125,7 +125,7 @@ One row per rule. `mine` gives the first block, `add_p_values` the second, and
 | `sample_id` | which sample, from `run_samples` only |
 | `conditional_p_value` | complex rules only: the largest p-value over its simpler rules; missing if any comparison is untestable |
 | `conditional_individual_fdr` | optional corrected conditional p-value within this sample and rule size; missing when the conditional p-value is missing or too few shuffles can meet `max_conditional_individual_fdr` |
-| `conditional_status` | `tested`, `no_simpler`, `not_applicable`, or `untestable` |
+| `conditional_status` | `tested`, `not_applicable`, or `untestable` |
 
 ## Pipeline
 
@@ -226,18 +226,18 @@ conditional, comparisons = result.add_conditional_p_values(
 | `calculate_fdr` | default `True`; `False` skips `conditional_individual_fdr` |
 | `max_conditional_individual_fdr` | warns when too few shuffles can reach this cutoff; default `None` skips the check |
 
-- **Simpler rules** come from `result.raw_rules`: every rule the searches measured,
-  of either kind, before the final thresholds. Matching is by cell type, so simpler
-  rules that fix the same types are one comparison. Only their cell types are used.
+- **Simpler rules** keep the single-item side and take every nonempty proper subset
+  of the complex side, regardless of support or presence in `result.raw_rules`.
+  Only their cell types are used; subsets fixing the same types are one comparison.
 - **The count.** A shuffle counts when the rule's metric is at least as high as mined
   (`attracts`) or at least as low (`avoids`). Ties count; a shuffle missing a side
   never does. Mining thresholds play no part. The p-value is
   `(count + 1) / (n_shuffles + 1)`, and the rule keeps the largest over its comparisons.
 - **FDR.** `conditional_individual_fdr` is Benjamini–Hochberg per sample and rule size, over all
   allowed candidates, as `individual_fdr` is.
-- **Missing values.** Pairwise and mixed rules are not tested. No simpler rule, a
-  missing cell type, all types fixed, nothing left to shuffle, or a missing mined
-  metric leaves the p-value missing. `comparisons` says why.
+- **Missing values.** Pairwise and mixed rules are not tested. A missing cell type,
+  all types fixed, nothing left to shuffle, or a missing mined metric leaves the
+  p-value missing. `comparisons` says why.
 
 `comparisons` has one row per comparison, linked to the rules by `rule_idx`.
 `report.comparisons()` joins to `report.rules()` on `["sample_id", "rule_idx"]`.
