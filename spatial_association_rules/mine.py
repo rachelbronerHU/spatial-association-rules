@@ -14,7 +14,7 @@ from .attraction import mine_attraction
 from .avoidance import mine_avoidance
 from .rules import drop_rare_labels, empty_rules, weight_matrix
 from .settings import Settings
-from .validation.significance import p_values_for
+from .validation.significance import _held_fixed, p_values_for
 from .validation.conditional import conditional_p_values, conditional_test_plan
 from .validation.false_discovery import check_fdr_cutoff, fdr_by_size, fdr_families
 from .transactions import Patch, build_transactions, find_patches, measure_patches
@@ -59,7 +59,8 @@ class Result:
     raw_rules: pd.DataFrame = field(default_factory=pd.DataFrame, repr=False)
 
     def add_p_values(self, n_shuffles, random_seed=None, labels_kept_fixed=(), sample_id="",
-                     max_individual_fdr=None, calculate_fdr=True, permutation_dir=None):
+                     max_individual_fdr=None, calculate_fdr=True, permutation_dir=None,
+                     *, fixed_cells=None):
         """
         Return raw p-values and, if requested, their corrected `individual_fdr` for this sample.
         Only pairwise rules are shuffled. Complex rules keep NaN: the conditional test
@@ -69,6 +70,7 @@ class Result:
         set, warn if too few shuffles are planned for any rule to pass; `individual_fdr`
         is then NaN. calculate_fdr chooses whether to correct at all.
         If permutation_dir is set, save shuffle metrics under that directory.
+        fixed_cells is a boolean mask; True holds that cell fixed regardless of its label.
         """
         if not isinstance(calculate_fdr, bool):
             raise ValueError("calculate_fdr must be a bool")
@@ -76,6 +78,8 @@ class Result:
         if not calculate_fdr and max_individual_fdr is not None:
             raise ValueError("max_individual_fdr requires calculate_fdr=True")
         labels_kept_fixed = tuple(labels_kept_fixed)
+        if fixed_cells is not None:
+            fixed_cells = _held_fixed(self.labels, (), fixed_cells)
         rules = self.rules.copy()
         rules.drop(columns="individual_fdr", errors="ignore", inplace=True)
         pairwise = (rules["antecedents"].map(len) + rules["consequents"].map(len) == 2).to_numpy(dtype=bool)
@@ -88,11 +92,13 @@ class Result:
         rules.loc[pairwise, "regular_p_value"] = p_values_for(
             rules[pairwise], self.patches, self.labels, self.settings,
             n_shuffles, random_seed, labels_kept_fixed, sample_id,
-            permutation_dir=permutation_dir,
+            permutation_dir=permutation_dir, fixed_cells=fixed_cells,
         )
         if calculate_fdr:
             rules["individual_fdr"] = fdr_by_size(rules, rules["regular_p_value"], families)
         rules.attrs["labels_kept_fixed"] = labels_kept_fixed
+        if fixed_cells is not None:
+            rules.attrs["fixed_cells"] = tuple(fixed_cells.tolist())
         return rules
 
     def conditional_test_plan(self, tested, *, labels_kept_fixed=(), metric=None):
@@ -105,8 +111,8 @@ class Result:
                                  permutation_dir=None):
         """Return (rules, comparisons) with conditional p-values for complex rules.
 
-        Every nonempty proper subset of the complex side is compared. Fixed labels
-        recorded by add_p_values are kept; labels_kept_fixed adds more.
+        Every nonempty proper subset of the complex side is compared.
+        Fixation recorded by add_p_values is kept; labels_kept_fixed adds more types.
         metric: "lift", "conviction", or None for lift on complex antecedents and
         conviction on complex consequents. With
         max_conditional_individual_fdr set, warn when too few shuffles can reach it. See DESIGN.md.

@@ -20,7 +20,7 @@ from .validation.conditional import check_metric, check_shuffle_count
 from .validation.false_discovery import check_fdr_cutoff
 from .validation.permutations import sample_folder
 from .settings import Settings
-from .validation.significance import seed_for
+from .validation.significance import _held_fixed, seed_for
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +76,7 @@ class _SampleTask:
     calculate_individual_fdr: bool
     calculate_conditional_individual_fdr: bool
     permutation_dir: object = None
+    fixed_cells: object = None
 
 
 def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
@@ -83,11 +84,12 @@ def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
                 n_conditional_shuffles=None, conditional_metric=None,
                 max_conditional_individual_fdr=None, calculate_individual_fdr=True,
                 calculate_conditional_individual_fdr=True,
-                save_permutation_metrics=False) -> RunReport:
+                save_permutation_metrics=False, fixed_cells=None) -> RunReport:
     """
     Mine every sample and report what came back, with raw p-values and nothing cut.
 
     samples:      iterable of (sample_id, coords, labels)
+    fixed_cells:  optional mapping of sample_id to a boolean mask; True keeps a cell fixed.
     workers:      An integer runs that many processes — on Windows,
                   guard the caller with `if __name__ == "__main__"`.
                   `None` makes it to run here. 
@@ -125,6 +127,7 @@ def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
         n_conditional_shuffles = int(n_conditional_shuffles)
     setup_console_logging()
     permutation_dir = os.path.join(output_path, "permutations") if save_permutation_metrics else None
+    # Keep selected cells fixed during shuffling, independently of their labels.
     tasks = [
         _SampleTask(
             sample_id=sample_id, coords=coords, labels=labels, settings=settings,
@@ -135,11 +138,15 @@ def run_samples(samples, settings: Settings, *, n_shuffles, random_seed=None,
             calculate_individual_fdr=calculate_individual_fdr,
             calculate_conditional_individual_fdr=calculate_conditional_individual_fdr,
             permutation_dir=permutation_dir,
+            fixed_cells=_held_fixed(labels, (), fixed_cells[sample_id])
+                        if fixed_cells is not None and sample_id in fixed_cells else None,
         )
         for sample_id, coords, labels in samples
     ]
     if not tasks:
         raise ValueError("no samples were given")
+    if fixed_cells is not None and set(fixed_cells) - {task.sample_id for task in tasks}:
+        raise ValueError("fixed_cells contains sample IDs absent from samples")
     if permutation_dir is not None:
         _check_permutation_dir(permutation_dir, [task.sample_id for task in tasks])
 
@@ -189,6 +196,7 @@ def _run_one(task):
             max_individual_fdr=task.max_individual_fdr,
             calculate_fdr=task.calculate_individual_fdr,
             permutation_dir=task.permutation_dir,
+            fixed_cells=task.fixed_cells,
         )
         comparisons = pd.DataFrame()
         if task.n_conditional_shuffles is not None:

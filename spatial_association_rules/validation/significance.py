@@ -33,7 +33,7 @@ def seed_for(base_seed, sample_id):
 
 
 def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labels_kept_fixed, sample_id="",
-                 *, permutation_dir=None):
+                 *, permutation_dir=None, fixed_cells=None):
     """The raw p-value for each rule, in order. Nothing is corrected here (no FDR)."""
 
     if rules.empty or n_shuffles <= 0:
@@ -71,7 +71,7 @@ def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labe
     # --- 3. LOCK FIXED CELLS ---
 
     # Identify which cells can be randomly reassigned vs which must stay anchored.
-    fixed = _held_fixed(labels, labels_kept_fixed)
+    fixed = _held_fixed(labels, labels_kept_fixed, fixed_cells)
     movable = np.flatnonzero(~fixed)
     _check_enough_moves(movable.size, len(labels), labels_kept_fixed)
     
@@ -102,7 +102,7 @@ def p_values_for(rules, patches, labels, settings, n_shuffles, random_seed, labe
     fixed_types = ()
     if permutation_dir is not None:
         rule_idx = rules["rule_idx"].to_numpy() if "rule_idx" in rules else np.arange(len(rules))
-        fixed_types = tuple(sorted(set(labels[fixed])))
+        fixed_types = tuple(sorted(set(labels) - set(labels[~fixed])))
     with record_permutations(permutation_dir, n_shuffles, rule_idx,
                              sample_id=sample_id, test="regular_p_value", fixed_types=fixed_types) as recorded:
         # Reuse ordinary row buffers; no mapped views leave the batch.
@@ -204,9 +204,9 @@ def not_crowded(membership, patch_sizes, cell_labels, max_one_type_share):
     return counts.max(axis=1) <= max_one_type_share * patch_sizes
 
 
-def _held_fixed(labels, patterns):
+def _held_fixed(labels, patterns, fixed_cells=None):
     """
-    Cells whose label never moves.
+    Cells fixed by label patterns or an individual boolean mask.
 
     'Name' matches exactly. 'Name*' matches any label starting with Name.
     """
@@ -224,6 +224,11 @@ def _held_fixed(labels, patterns):
 
     if patterns and not fixed.any():
         logger.warning(f"No cell matched labels_kept_fixed={tuple(patterns)}")
+    if fixed_cells is not None:
+        mask = np.asarray(fixed_cells)
+        if mask.dtype != np.dtype(bool) or mask.shape != (len(labels),):
+            raise ValueError("fixed_cells must be a boolean mask with one entry per cell")
+        fixed |= mask
     return fixed
 
 
@@ -234,13 +239,13 @@ def _check_enough_moves(movable, n_cells, patterns):
     """Pin too many labels and the shuffled tissue is the real one, so refuse."""
     if movable <= 1:
         raise ValueError(
-            f"labels_kept_fixed={tuple(patterns)} leaves {movable} of {n_cells} cells free "
+            f"The fixed-cell selection (labels_kept_fixed={tuple(patterns)}) leaves {movable} of {n_cells} cells free "
             f"to move, so no shuffle changes anything and every p-value would be 1.0. "
             f"Pin fewer labels, or pass n_shuffles=0 if you meant not to test"
         )
     if movable < ENOUGH_MOVABLE * n_cells:
         logger.warning(
-            f"labels_kept_fixed={tuple(patterns)} leaves only {movable} of {n_cells} cells "
+            f"The fixed-cell selection (labels_kept_fixed={tuple(patterns)}) leaves only {movable} of {n_cells} cells "
             f"({movable / n_cells:.1%}) free to move. The shuffled tissue barely differs "
             f"from the real one, so the p-values will be very conservative"
         )

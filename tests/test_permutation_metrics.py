@@ -134,7 +134,10 @@ def test_runner_recording_is_optional_and_keeps_samples_separate(tmp_path, worke
     coords, labels = grid_tissue()
     settings = base(max_items_per_rule=3)
     samples = [("FOV/1", coords, labels), ("FOV\\1", coords, labels)]
-    options = dict(n_shuffles=9, random_seed=7, workers=workers)
+    fixed = {sample_id: np.arange(len(labels)) == position
+             for position, (sample_id, _, _) in enumerate(samples)}
+    options = dict(n_shuffles=9, n_conditional_shuffles=9, random_seed=7, workers=workers,
+                   fixed_cells=fixed)
     expected = run_samples(samples, settings, output_path=tmp_path / "off", **options)
     assert not (tmp_path / "off" / "permutations").exists()
     actual = run_samples(samples, settings, output_path=tmp_path / "on",
@@ -143,6 +146,7 @@ def test_runner_recording_is_optional_and_keeps_samples_separate(tmp_path, worke
     config = json.loads((tmp_path / "on" / "run_config.json").read_text())
     assert config["steps"]["save_permutation_metrics"] is True
     for result in actual.results:
+        assert result.rules.attrs["fixed_cells"] == tuple(fixed[result.sample_id])
         path = tmp_path / "on" / "permutations" / ("sample_" + quote(result.sample_id, safe=""))
         with np.load(path / "regular_p_value.npz", allow_pickle=False) as data:
             assert data["sample_id"].item() == result.sample_id

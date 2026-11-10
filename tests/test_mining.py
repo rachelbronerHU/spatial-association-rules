@@ -421,7 +421,7 @@ def test_resolution_check_includes_rules_from_relaxed_high_confidence_support(mo
     assert mined.iloc[0].support == pytest.approx(0.1)
     result = Result(mined, {}, [], np.array(["A", "B", "C", "D"]), settings)
 
-    def shuffling(rules, *args, permutation_dir=None):
+    def shuffling(rules, *args, permutation_dir=None, fixed_cells=None):
         assert len(rules) == 1
         return np.array([1 / 320])
 

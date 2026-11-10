@@ -35,8 +35,9 @@ def conditional_test_plan(rules, labels, labels_kept_fixed=(), metric=None):
         raise ValueError("rule kind must be attracts or avoids")
 
     labels = np.asarray(labels, dtype=str)
-    patterns = tuple(rules.attrs.get("labels_kept_fixed", ())) + tuple(labels_kept_fixed)
-    configured = set(labels[_held_fixed(labels, patterns)])
+    base_fixed = _configured_fixed(rules, labels, labels_kept_fixed)
+    # A partially fixed type must still have its remaining cells shuffled.
+    configured = set(labels) - set(labels[~base_fixed])
     available = set(labels)
     movable_by_fixed = {}
     comparisons = []
@@ -52,7 +53,7 @@ def conditional_test_plan(rules, labels, labels_kept_fixed=(), metric=None):
                 continue  # Another simpler rule already fixes the same types.
             seen.add(fixed)
             if fixed not in movable_by_fixed:
-                movable = ~np.isin(labels, fixed)
+                movable = ~(base_fixed | np.isin(labels, fixed))
                 movable_by_fixed[fixed] = (int(movable.sum()), len(set(labels[movable])) >= 2)
             movable_cells, can_shuffle = movable_by_fixed[fixed]
             status = "ready"
@@ -90,6 +91,7 @@ def conditional_p_values(rules, patches, labels, settings, *, n_shuffles,
     check_shuffle_count(n_shuffles, "n_shuffles")
     labels = np.asarray(labels, dtype=str)
     plan = conditional_test_plan(rules, labels, labels_kept_fixed, metric)
+    base_fixed = _configured_fixed(rules, labels, labels_kept_fixed)
     plan["p_value"] = np.nan
     ids = rules["rule_idx"].to_numpy() if "rule_idx" in rules else np.arange(len(rules))
     batches = 0
@@ -112,7 +114,7 @@ def conditional_p_values(rules, patches, labels, settings, *, n_shuffles,
                     f"{batches} shuffle batches, {n_shuffles} shuffles per batch")
 
         for batch, (fixed, group) in enumerate(groups, 1):
-            movable = np.flatnonzero(~np.isin(labels, fixed))
+            movable = np.flatnonzero(~(base_fixed | np.isin(labels, fixed)))
             positions = np.unique(group.rule_pos.to_numpy(dtype=int))
             layout = _rule_columns(rules.iloc[positions], item_index)
             rng = np.random.default_rng(seed_for(random_seed, json.dumps(fixed)))
@@ -154,6 +156,12 @@ def conditional_p_values(rules, patches, labels, settings, *, n_shuffles,
     comparisons = plan.rename(columns={"rule_pos": "rule_idx"})
     comparisons["rule_idx"] = ids[plan.rule_pos.to_numpy(dtype=int)]
     return result, comparisons
+
+
+def _configured_fixed(rules, labels, labels_kept_fixed):
+    """Combine inherited fixation with any additional fixed cell types."""
+    patterns = tuple(rules.attrs.get("labels_kept_fixed", ())) + tuple(labels_kept_fixed)
+    return _held_fixed(labels, patterns, rules.attrs.get("fixed_cells"))
 
 
 def check_shuffle_count(value, name):
